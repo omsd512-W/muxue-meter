@@ -231,7 +231,13 @@ function scheduleFlush($) {
 const LOG_LIMIT = 50 * 1048576
 const LOG_WARN = 40 * 1048576
 const LOG_SCAN_MS = 5 * 60000
-let logFile = { sid: null, path: null, scannedAt: 0 }
+// How much of the file's start is read to tell whether it was cut, and the growth between two
+// checks that means it was rewritten (as when the earlier conversation is put back in front).
+const LOG_HEAD = 262144
+const LOG_JUMP = 5 * 1048576
+// cut: whether the transcript starts at a compaction (see startsCut); undefined until checked,
+// null when that could not be told.
+let logFile = { sid: null, path: null, scannedAt: 0, cut: undefined }
 let logBytes = null // size of this session's transcript, null until it is found
 const fmtMB = (b) => (b >= 100 * 1048576 ? (b / 1048576).toFixed(0) : (b / 1048576).toFixed(1))
 
@@ -256,10 +262,40 @@ async function findLog($) {
   }
   return null
 }
-// Redraws only when the shown size (0.1 MB) changes.
+// A session forked or rewound in the desktop app after a compaction goes on in a new transcript
+// that starts at that compaction: the conversation before it stays in the old file, and the app
+// shows the new one alone. Its first message is the compaction boundary; any other transcript,
+// a compacted one too, starts with a message of the conversation.
+async function startsCut($, path) {
+  let head = null
+  try {
+    const run = await $.process.run(['head', '-c', String(LOG_HEAD), path], { timeoutMs: 5000 })
+    if (run.exitCode === 0) head = run.stdout
+  } catch {}
+  // No head (Windows): the whole file.
+  if (head === null) head = await $.fs.read(path)
+  for (const line of head.split('\n')) {
+    if (!line.includes('"uuid"')) continue
+    let row
+    try {
+      row = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (typeof row?.uuid !== 'string' || !['user', 'assistant', 'system', 'attachment'].includes(row.type)) continue
+    return row.type === 'system' && row.subtype === 'compact_boundary'
+  }
+  return null
+}
+// What the band shows of the transcript; it redraws only when this changes.
+const logShown = () => (logBytes === null ? null : fmtMB(logBytes) + (logFile.cut ? ' cut' : ''))
 async function refreshLog($) {
   await ensureSession($)
-  if (logFile.sid !== sid) logFile = { sid, path: null, scannedAt: 0 }
+  if (logFile.sid !== sid) {
+    logFile = { sid, path: null, scannedAt: 0, cut: undefined }
+    logBytes = null
+  }
+  const before = logShown()
   if (!logFile.path) logFile.path = await findLog($)
   let bytes = null
   if (logFile.path) {
@@ -267,16 +303,21 @@ async function refreshLog($) {
     if (st && st.kind === 'file') bytes = st.size
     else logFile.path = null
   }
-  const shown = (b) => (b === null ? null : fmtMB(b))
-  const changed = shown(bytes) !== shown(logBytes)
+  // Told once the file is found, and again when it was rewritten: it shrank, or grew by more
+  // than a turn writes.
+  const rewritten = logBytes !== null && bytes !== null && (bytes < logBytes || bytes - logBytes > LOG_JUMP)
+  if (bytes !== null && (logFile.cut === undefined || rewritten)) {
+    logFile.cut = await startsCut($, logFile.path).catch(() => null)
+  }
   logBytes = bytes
-  if (changed) $.ui.invalidate('ui.render')
+  if (logShown() !== before) $.ui.invalidate('ui.render')
 }
 // "Transcript 18.0/50MB" on the desktop, where the limit applies; "Transcript 18.0MB" elsewhere.
 const logText = (surface) =>
   logBytes === null ? null : tr('log') + ' ' + fmtMB(logBytes) + (surface === 'desktop' ? '/' + LOG_LIMIT / 1048576 : '') + 'MB'
 const logWarns = (surface) => surface === 'desktop' && logBytes !== null && logBytes >= LOG_WARN
 const logColor = () => (logBytes >= LOG_LIMIT ? 'red' : 'yellow')
+const isLogCut = () => logBytes !== null && logFile.cut === true
 
 // cfg is shared by every session. A change re-reads the stored copy and applies only itself,
 // so two sessions never undo each other's edits (a rename in one, a range change in another).
@@ -861,7 +902,7 @@ const LANG_ORDER = Object.keys(LANG_NAMES)
 
 const STR = {
   en: {
-    session: 'Session', log: 'Transcript', today: 'Today', hit: 'Cache hit', vHide: 'Hide', vBrief: 'Brief', vFull: 'Detailed',
+    session: 'Session', log: 'Transcript', logCut: 'Truncated', today: 'Today', hit: 'Cache hit', vHide: 'Hide', vBrief: 'Brief', vFull: 'Detailed',
     d1: '1d', d7: '7d', d30: '30d', acct: 'Account', all: 'All', cur: 'current', acctN: 'Account {id}',
     edit: 'Rename', rnPh: 'Type a name, press Enter', save: 'Save',
     nodata: 'No data for the last {n} days yet. It starts counting after your next message.',
@@ -877,7 +918,7 @@ const STR = {
     left: '{t} left', uD: 'd ', uH: 'h ', uM: 'm', qEmpty: 'No rate-limit reading yet (subscription accounts only); it appears after your next message.', tUsage: 'Overview', tQuota: 'Quota', tModels: 'Models', tDaily: 'Daily',
   },
   'zh-CN': {
-    session: '当前会话', log: '记录', today: '今日', hit: '缓存命中', vHide: '收起', vBrief: '简略', vFull: '详细',
+    session: '当前会话', log: '记录', logCut: '已截断', today: '今日', hit: '缓存命中', vHide: '收起', vBrief: '简略', vFull: '详细',
     d1: '1天', d7: '7天', d30: '30天', acct: '账户', all: '全部', cur: '当前', acctN: '账户 {id}',
     edit: '改名', rnPh: '输入名称后回车', save: '保存',
     nodata: '最近 {n} 天还没有数据，发一条消息后开始统计',
@@ -893,7 +934,7 @@ const STR = {
     left: '剩{t}', uD: '天', uH: '小时', uM: '分钟', qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
   },
   'zh-TW': {
-    session: '目前工作階段', log: '記錄', today: '今日', hit: '快取命中', vHide: '收合', vBrief: '簡略', vFull: '詳細',
+    session: '目前工作階段', log: '記錄', logCut: '已截斷', today: '今日', hit: '快取命中', vHide: '收合', vBrief: '簡略', vFull: '詳細',
     d1: '1天', d7: '7天', d30: '30天', acct: '帳號', all: '全部', cur: '目前', acctN: '帳號 {id}',
     edit: '改名', rnPh: '輸入名稱後按 Enter', save: '儲存',
     nodata: '最近 {n} 天還沒有資料，傳送一則訊息後開始統計',
@@ -907,7 +948,7 @@ const STR = {
     qEmpty: '還沒有限額讀數（僅訂閱帳號），傳送一則訊息後出現', tUsage: '概覽', tQuota: '額度', tModels: '模型', tDaily: '每日',
   },
   ja: {
-    session: 'セッション', log: '履歴', today: '今日', hit: 'キャッシュ命中', vHide: '隠す', vBrief: '簡易', vFull: '詳細',
+    session: 'セッション', log: '履歴', logCut: '切り詰め', today: '今日', hit: 'キャッシュ命中', vHide: '隠す', vBrief: '簡易', vFull: '詳細',
     d1: '1日', d7: '7日', d30: '30日', acct: 'アカウント', all: 'すべて', cur: '現在', acctN: 'アカウント {id}',
     edit: '名前変更', rnPh: '名前を入力して Enter', save: '保存',
     nodata: '直近 {n} 日のデータはまだありません。次のメッセージから集計します。',
@@ -921,7 +962,7 @@ const STR = {
     qEmpty: '上限の読み取りはまだありません（サブスクリプションのみ）。次のメッセージ後に表示されます。', tUsage: '概要', tQuota: '利用枠', tModels: 'モデル', tDaily: '日別',
   },
   ko: {
-    session: '현재 세션', log: '기록', today: '오늘', hit: '캐시 적중', vHide: '숨기기', vBrief: '간략', vFull: '자세히',
+    session: '현재 세션', log: '기록', logCut: '잘림', today: '오늘', hit: '캐시 적중', vHide: '숨기기', vBrief: '간략', vFull: '자세히',
     d1: '1일', d7: '7일', d30: '30일', acct: '계정', all: '전체', cur: '현재', acctN: '계정 {id}',
     edit: '이름 변경', rnPh: '이름 입력 후 Enter', save: '저장',
     nodata: '최근 {n}일 데이터가 아직 없습니다. 다음 메시지부터 집계합니다.',
@@ -935,7 +976,7 @@ const STR = {
     qEmpty: '아직 한도 정보가 없습니다(구독 계정만). 다음 메시지 후 표시됩니다.', tUsage: '개요', tQuota: '한도', tModels: '모델', tDaily: '일별',
   },
   es: {
-    session: 'Sesión', log: 'Historial', today: 'Hoy', hit: 'Acierto de caché', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalles',
+    session: 'Sesión', log: 'Historial', logCut: 'Truncado', today: 'Hoy', hit: 'Acierto de caché', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalles',
     d1: '1 d', d7: '7 d', d30: '30 d', acct: 'Cuenta', all: 'Todas', cur: 'actual', acctN: 'Cuenta {id}',
     edit: 'Renombrar', rnPh: 'Escribe un nombre y pulsa Enter', save: 'Guardar',
     nodata: 'Aún no hay datos de los últimos {n} días. Empieza a contar con tu próximo mensaje.',
@@ -949,7 +990,7 @@ const STR = {
     qEmpty: 'Aún no hay lectura de límites (solo cuentas de suscripción); aparece tras tu próximo mensaje.', tUsage: 'Resumen', tQuota: 'Cuota', tModels: 'Modelos', tDaily: 'Diario',
   },
   de: {
-    session: 'Sitzung', log: 'Verlauf', today: 'Heute', hit: 'Cache-Treffer', vHide: 'Ausblenden', vBrief: 'Kurz', vFull: 'Details',
+    session: 'Sitzung', log: 'Verlauf', logCut: 'Gekürzt', today: 'Heute', hit: 'Cache-Treffer', vHide: 'Ausblenden', vBrief: 'Kurz', vFull: 'Details',
     d1: '1 T', d7: '7 T', d30: '30 T', acct: 'Konto', all: 'Alle', cur: 'aktuell', acctN: 'Konto {id}',
     edit: 'Umbenennen', rnPh: 'Namen eingeben, Enter drücken', save: 'Speichern',
     nodata: 'Noch keine Daten für die letzten {n} Tage. Die Zählung beginnt mit der nächsten Nachricht.',
@@ -963,7 +1004,7 @@ const STR = {
     qEmpty: 'Noch kein Limit-Wert (nur Abo-Konten); erscheint nach der nächsten Nachricht.', tUsage: 'Übersicht', tQuota: 'Kontingent', tModels: 'Modelle', tDaily: 'Täglich',
   },
   fr: {
-    session: 'Session', log: 'Historique', today: "Aujourd'hui", hit: 'Succès du cache', vHide: 'Masquer', vBrief: 'Bref', vFull: 'Détails',
+    session: 'Session', log: 'Historique', logCut: 'Tronqué', today: "Aujourd'hui", hit: 'Succès du cache', vHide: 'Masquer', vBrief: 'Bref', vFull: 'Détails',
     d1: '1 j', d7: '7 j', d30: '30 j', acct: 'Compte', all: 'Tous', cur: 'actuel', acctN: 'Compte {id}',
     edit: 'Renommer', rnPh: 'Saisissez un nom, puis Entrée', save: 'Enregistrer',
     nodata: "Pas encore de données sur les {n} derniers jours. Le suivi commence au prochain message.",
@@ -977,7 +1018,7 @@ const STR = {
     qEmpty: 'Pas encore de relevé des limites (comptes abonnés seulement) ; il apparaît après le prochain message.', tUsage: 'Aperçu', tQuota: 'Quota', tModels: 'Modèles', tDaily: 'Par jour',
   },
   pt: {
-    session: 'Sessão', log: 'Histórico', today: 'Hoje', hit: 'Acerto de cache', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalhes',
+    session: 'Sessão', log: 'Histórico', logCut: 'Truncado', today: 'Hoje', hit: 'Acerto de cache', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalhes',
     d1: '1 d', d7: '7 d', d30: '30 d', acct: 'Conta', all: 'Todas', cur: 'atual', acctN: 'Conta {id}',
     edit: 'Renomear', rnPh: 'Digite um nome e pressione Enter', save: 'Salvar',
     nodata: 'Ainda não há dados dos últimos {n} dias. A contagem começa na próxima mensagem.',
@@ -991,7 +1032,7 @@ const STR = {
     qEmpty: 'Ainda não há leitura de limites (só contas de assinatura); aparece após a próxima mensagem.', tUsage: 'Resumo', tQuota: 'Cota', tModels: 'Modelos', tDaily: 'Diário',
   },
   ru: {
-    session: 'Сессия', log: 'История', today: 'Сегодня', hit: 'Попадания в кэш', vHide: 'Скрыть', vBrief: 'Кратко', vFull: 'Подробно',
+    session: 'Сессия', log: 'История', logCut: 'Обрезан', today: 'Сегодня', hit: 'Попадания в кэш', vHide: 'Скрыть', vBrief: 'Кратко', vFull: 'Подробно',
     d1: '1 д', d7: '7 д', d30: '30 д', acct: 'Аккаунт', all: 'Все', cur: 'текущий', acctN: 'Аккаунт {id}',
     edit: 'Переименовать', rnPh: 'Введите имя и нажмите Enter', save: 'Сохранить',
     nodata: 'Данных за последние {n} дн. пока нет. Подсчёт начнётся со следующего сообщения.',
@@ -1204,6 +1245,8 @@ export function register(on) {
     // no width drops.
     const log = logText(e.surface)
     const logMark = logWarns(e.surface) ? '⚠ ' + log : null
+    // A transcript that starts at a compaction: the conversation before it is in another file.
+    const cutMark = isLogCut() ? '✂ ' + tr('logCut') : null
     const withLog = (p) => (log && !logMark ? [p[0], p[1], log, ...p.slice(2)] : p)
     // Narrower and narrower: the transcript size, the model name, then the cache hit, go before
     // the fills; the cryptic compact form is the last resort.
@@ -1221,7 +1264,8 @@ export function register(on) {
     ].map((p) => p.join(' · '))
     const badge =
       (latest ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 + (expanded ? 0 : strWidth(tr('updShow')) + 2) : 0) +
-      (logMark ? strWidth(logMark) + 2 : 0)
+      (logMark ? strWidth(logMark) + 2 : 0) +
+      (cutMark ? strWidth(cutMark) + 2 : 0)
     const langW = expanded ? strWidth(cfg.lang === 'auto' ? 'Auto · ' + LANG_NAMES[autoLang] : LANG_NAMES[cfg.lang] || '') + 8 : 0
     // The view switch is in the prompt footer (SessionMode), not here.
     const room = cols - badge - langW
@@ -1234,6 +1278,7 @@ export function register(on) {
       children: [
         Text({ dimColor: true, wrap: 'truncate-end', children: [status] }),
         ...(logMark ? [Text({ color: logColor(), children: [logMark] })] : []),
+        ...(cutMark ? [Text({ color: 'yellow', children: [cutMark] })] : []),
         ...(latest ? [Text({ color: 'yellow', children: ['⬆ ' + tr('upd', { v: 'v' + latest })] })] : []),
         // Opens the card, where the update command is.
         ...(latest && !expanded
@@ -1293,8 +1338,8 @@ export function register(on) {
     const view = curView()
     const tps = (await $.state.get(S_TPS)).value ?? null
     const label = '⚡' + (tps ? tps.value.toFixed(0) : '—') + ' · ' + usdOf(sessionTotals()) + (latest ? ' ⬆' : '')
-    // The transcript's size, colored from LOG_WARN on the desktop.
-    const size = logBytes === null ? null : fmtMB(logBytes) + 'MB'
+    // The transcript's size, colored from LOG_WARN on the desktop; ✂ when it was cut.
+    const size = logBytes === null ? null : fmtMB(logBytes) + 'MB' + (isLogCut() ? ' ✂' : '')
     const at = VIEWS.findIndex(([v]) => v === view)
     const entry = Box({
       flexDirection: 'row',

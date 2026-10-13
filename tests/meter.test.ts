@@ -40,6 +40,10 @@ type World = {
   logs?: Record<string, number>
   // Folders listed under .../.claude/projects.
   projectDirs?: string[]
+  // What `head` prints of a transcript, by full path; change it to rewrite one. noHead: no `head`
+  // command (Windows), so the file is read whole through `files`.
+  heads?: Record<string, string>
+  noHead?: boolean
 }
 
 // Answers every noun the plugin calls beneath it. Files are matched by path suffix, so the
@@ -69,6 +73,11 @@ function world(on: On, w: World) {
   on('fs.stat', ($, e) => {
     if (!(e.path in logs)) throw new Error('ENOENT: ' + e.path)
     return { value: { kind: 'file', size: logs[e.path], mtimeMs: NOW, isLink: false } }
+  })
+  on('process.run', ($, e) => {
+    if (w.noHead || e.argv[0] !== 'head') throw new Error('ENOENT: ' + e.argv[0])
+    const stdout = (w.heads ?? {})[e.argv[e.argv.length - 1]] ?? ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.list', ($, e) => ({
     value: e.path.endsWith('/.claude/projects')
@@ -994,4 +1003,65 @@ test('transcript size: nothing shown before the transcript is written', async ($
     expect(await ui.find({ type: 'Text', text: /Transcript/ })).toBeUndefined()
     await ui.unmount()
   }
+})
+
+// The start of a transcript: a few rows with no uuid, then its first message.
+const jsonl = (...rows: object[]) => rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
+const meta = { type: 'custom-title', customTitle: 'x', sessionId: 'session-1' }
+const boundary = { type: 'system', subtype: 'compact_boundary', uuid: 'b1', parentUuid: null, sessionId: 'session-1' }
+const prompt = { type: 'user', uuid: 'u0', parentUuid: null, message: { role: 'user', content: 'hi' }, sessionId: 'session-1' }
+const LOG = '/Users/mac/.claude/projects/-work/session-1.jsonl'
+
+// Mounts the band and the footer on each surface and checks the cut mark and the footer's text.
+async function expectCut($: any, isCut: boolean, size: string) {
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
+    const mark = await ui.find({ type: 'Text', text: '✂ Truncated' })
+    if (isCut) expect(mark?.props.color).toBe('yellow')
+    else expect(mark).toBeUndefined()
+    expect(await foot.find({ type: 'Text', text: size + (isCut ? ' ✂' : '') })).toBeDefined()
+    await ui.unmount()
+    await foot.unmount()
+  }
+}
+
+test('transcript cut: one that starts at a compaction is marked on every surface', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac' }, logs: { [LOG]: 3 * MB }, heads: { [LOG]: jsonl(meta, boundary, { ...prompt, uuid: 'u1', parentUuid: 'b1' }) } })
+  await start($, 'desktop')
+  await expectCut($, true, '3.0MB')
+})
+
+test('transcript cut: a compacted one that starts with the conversation is not marked', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac' }, logs: { [LOG]: 3 * MB }, heads: { [LOG]: jsonl(meta, prompt, boundary) } })
+  await start($, 'desktop')
+  await expectCut($, false, '3.0MB')
+})
+
+test('transcript cut: told from the whole file where there is no head command', async ($, on) => {
+  world(on, {
+    env: { HOME: '/Users/mac' },
+    noHead: true,
+    logs: { [LOG]: 3 * MB },
+    files: { [LOG]: jsonl(meta, boundary, { ...prompt, uuid: 'u1', parentUuid: 'b1' }) },
+  })
+  await start($, 'desktop')
+  await expectCut($, true, '3.0MB')
+})
+
+test('transcript cut: the mark goes once the earlier conversation is put back in front', async ($, on) => {
+  const logs = { [LOG]: 3 * MB }
+  const heads = { [LOG]: jsonl(meta, boundary, { ...prompt, uuid: 'u1', parentUuid: 'b1' }) }
+  world(on, { env: { HOME: '/Users/mac' }, logs, heads })
+  await start($, 'desktop')
+  await expectCut($, true, '3.0MB')
+  // A turn adds a little: not read again.
+  heads[LOG] = jsonl(meta, prompt)
+  logs[LOG] = 3.4 * MB
+  await measure($, [])
+  await expectCut($, true, '3.4MB')
+  // Rewritten with the old conversation in front: 15MB more, read again.
+  logs[LOG] = 18.4 * MB
+  await measure($, [])
+  await expectCut($, false, '18.4MB')
 })
