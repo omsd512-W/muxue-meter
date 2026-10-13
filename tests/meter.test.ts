@@ -7,6 +7,10 @@ import type { On } from 'claude-code'
 
 const SURFACES = ['terminal', 'desktop'] as const
 const NOW = Date.UTC(2026, 9, 2, 3, 0, 0)
+// The day NOW falls on where the tests run. Usage is filed under the local date, so a day written
+// out ('2026-10-02') is the day before NOW west of UTC-3 and drops out of "the last 7 days".
+const TODAY = ((d: Date) =>
+  d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'))(new Date(NOW))
 
 const band = (columns = 120) =>
   ({
@@ -193,7 +197,7 @@ test('a rename keeps names another session saved meanwhile', async ($, on) => {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
       cfg: { names: { [other]: 'work' }, hints: {}, range: '7', acct: 'all', exact: false, lang: 'en' },
-      's:old': { upd: NOW, days: { '2026-10-02': { [other]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } } },
+      's:old': { upd: NOW, days: { [TODAY]: { [other]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } } },
     },
   })
   const id = await hash('uuid-desktop')
@@ -343,7 +347,7 @@ test('quota: each account keeps its own readings; selecting one hides the others
       cfg: { ...enCfg, names: { [other]: 'work' } },
       's:old': {
         upd: NOW,
-        days: { '2026-10-02': { [other]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } },
+        days: { [TODAY]: { [other]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } },
         base: { [other]: { five_hour: { p: 0, r: NOW + H, at: NOW - 2 * H } } },
         b: { [bucket(NOW - H)]: { [other]: { u: 30 } } },
         rl: { [other]: { five_hour: { p: 60, r: NOW + H, at: NOW - 10 * 60000 } } },
@@ -531,7 +535,7 @@ test('quota: a CLI session whose ~/.claude.json names another account is filed u
       's:a': {
         upd: NOW,
         src: 'env',
-        days: { '2026-10-02': { [named]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } },
+        days: { [TODAY]: { [named]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } },
         base: { [named]: { seven_day: { p: 10, r: NOW + 100 * H, at: NOW - H } } },
       },
       's:b': {
@@ -580,7 +584,7 @@ test('a session whose own saved doc is unreadable still counts the other session
     store: {
       cfg: enCfg,
       's:session-1': 'not a doc',
-      's:old': { upd: NOW, days: { '2026-10-02': { [other]: { 'claude-sonnet-5-5': { i: 0, o: 1e6, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } } },
+      's:old': { upd: NOW, days: { [TODAY]: { [other]: { 'claude-sonnet-5-5': { i: 0, o: 1e6, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } } },
     },
   })
   await start($, 'desktop')
