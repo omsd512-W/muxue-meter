@@ -9,6 +9,8 @@ declare module 'claude-code' {
       editingExp: string | null
       tps: MuxueMeterTps | null
       tab: 'usage' | 'quota' | 'models' | 'daily'
+      // Quota windows whose use by model is shown, as "<account>|<window>"; the rest are folded.
+      qOpen: string[]
     }
   }
 }

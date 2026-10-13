@@ -115,6 +115,7 @@ const S_EDITING = { plugin: 'muxue-meter', key: 'editingName' }
 const S_EXPING = { plugin: 'muxue-meter', key: 'editingExp' }
 const S_TPS = { plugin: 'muxue-meter', key: 'tps' }
 const S_TAB = { plugin: 'muxue-meter', key: 'tab' }
+const S_QOPEN = { plugin: 'muxue-meter', key: 'qOpen' }
 
 // ---- helpers that touch the mods API ----------------------------------------------------
 
@@ -223,6 +224,59 @@ function scheduleFlush($) {
     } catch {}
   })
 }
+
+// ---- the session's transcript file ------------------------------------------------------
+// The desktop app reads a transcript of up to LOG_LIMIT whole; a larger one only from its last
+// compaction, so what came before no longer shows. Its size is shown, warning from LOG_WARN.
+const LOG_LIMIT = 50 * 1048576
+const LOG_WARN = 40 * 1048576
+const LOG_SCAN_MS = 5 * 60000
+let logFile = { sid: null, path: null, scannedAt: 0 }
+let logBytes = null // size of this session's transcript, null until it is found
+const fmtMB = (b) => (b >= 100 * 1048576 ? (b / 1048576).toFixed(0) : (b / 1048576).toFixed(1))
+
+// <config>/projects/<the session root, every character but letters and digits as "-">/<id>.jsonl.
+// A root long enough to be shortened with a hash, or a session moved to another folder, is found
+// by looking through every project folder, at most every LOG_SCAN_MS.
+async function findLog($) {
+  const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) || (home ? home + '/.claude' : '')
+  if (!config) return null
+  const projects = config.replace(/[\\/]+$/, '') + '/projects'
+  const name = sid + '.jsonl'
+  const guess = projects + '/' + (await $.session.root()).replace(/[^a-zA-Z0-9]/g, '-') + '/' + name
+  if (await $.fs.exists(guess)) return guess
+  const now = await $.clock.now()
+  if (now - logFile.scannedAt < LOG_SCAN_MS) return null
+  logFile.scannedAt = now
+  for (const e of await $.fs.list(projects)) {
+    if (e.kind !== 'dir') continue
+    const path = projects + '/' + e.name + '/' + name
+    if (await $.fs.exists(path)) return path
+  }
+  return null
+}
+// Redraws only when the shown size (0.1 MB) changes.
+async function refreshLog($) {
+  await ensureSession($)
+  if (logFile.sid !== sid) logFile = { sid, path: null, scannedAt: 0 }
+  if (!logFile.path) logFile.path = await findLog($)
+  let bytes = null
+  if (logFile.path) {
+    const st = await $.fs.stat(logFile.path).catch(() => null)
+    if (st && st.kind === 'file') bytes = st.size
+    else logFile.path = null
+  }
+  const shown = (b) => (b === null ? null : fmtMB(b))
+  const changed = shown(bytes) !== shown(logBytes)
+  logBytes = bytes
+  if (changed) $.ui.invalidate('ui.render')
+}
+// "Transcript 18.0/50MB" on the desktop, where the limit applies; "Transcript 18.0MB" elsewhere.
+const logText = (surface) =>
+  logBytes === null ? null : tr('log') + ' ' + fmtMB(logBytes) + (surface === 'desktop' ? '/' + LOG_LIMIT / 1048576 : '') + 'MB'
+const logWarns = (surface) => surface === 'desktop' && logBytes !== null && logBytes >= LOG_WARN
+const logColor = () => (logBytes >= LOG_LIMIT ? 'red' : 'yellow')
 
 // cfg is shared by every session. A change re-reads the stored copy and applies only itself,
 // so two sessions never undo each other's edits (a rename in one, a range change in another).
@@ -632,9 +686,20 @@ const readingsOf = (acct, kind, rd) =>
     .sort((a, b) => a.at - b.at || a.p - b.p)
 // When the window was last reset early (a reset card): its fill fell while resetsAt stayed put,
 // so the value recorded before it belongs to the old fill. 0 when it never was.
+// A reading only a little lower than the highest before it, or one a later reading climbs back
+// above, is a late one (held since before a restart, or another session's turn ending a little
+// after a fresher reading was saved), stamped with the time it was saved: not a reset.
 function resetAt(rds) {
   let at = 0
-  for (let i = 1; i < rds.length; i++) if (rds[i].p < rds[i - 1].p) at = rds[i].at
+  let top = -Infinity
+  for (let i = 0; i < rds.length; i++) {
+    const p = rds[i].p
+    const fell = p <= top - MIN_PCT && rds.slice(i + 1).every((v) => v.p < top)
+    if (fell) {
+      at = rds[i].at
+      top = p
+    } else top = Math.max(top, p)
+  }
   return at
 }
 // The earliest reading of this window since its last early reset.
@@ -678,7 +743,8 @@ async function saveReadings($, rateLimits) {
     ;(doc.rl[acct] ||= {})[rl.kind] = rd
     const base = (doc.base[acct] ||= {})
     // A new window, or the same one reset early (its fill fell): start over from this reading.
-    const reset = last && sameWindow(last, rd) && rd.p < last.p
+    // A fall of less than MIN_PCT points is a late reading, not a reset (see resetAt).
+    const reset = last && sameWindow(last, rd) && rd.p <= last.p - MIN_PCT
     if (!base[rl.kind] || !sameWindow(base[rl.kind], rd) || reset) base[rl.kind] = rd
     changed = true
   }
@@ -795,7 +861,7 @@ const LANG_ORDER = Object.keys(LANG_NAMES)
 
 const STR = {
   en: {
-    session: 'Session', today: 'Today', hit: 'Cache hit', vHide: 'Hide', vBrief: 'Brief', vFull: 'Detailed',
+    session: 'Session', log: 'Transcript', today: 'Today', hit: 'Cache hit', vHide: 'Hide', vBrief: 'Brief', vFull: 'Detailed',
     d1: '1d', d7: '7d', d30: '30d', acct: 'Account', all: 'All', cur: 'current', acctN: 'Account {id}',
     edit: 'Rename', rnPh: 'Type a name, press Enter', save: 'Save',
     nodata: 'No data for the last {n} days yet. It starts counting after your next message.',
@@ -811,7 +877,7 @@ const STR = {
     left: '{t} left', uD: 'd ', uH: 'h ', uM: 'm', qEmpty: 'No rate-limit reading yet (subscription accounts only); it appears after your next message.', tUsage: 'Overview', tQuota: 'Quota', tModels: 'Models', tDaily: 'Daily',
   },
   'zh-CN': {
-    session: '当前会话', today: '今日', hit: '缓存命中', vHide: '收起', vBrief: '简略', vFull: '详细',
+    session: '当前会话', log: '记录', today: '今日', hit: '缓存命中', vHide: '收起', vBrief: '简略', vFull: '详细',
     d1: '1天', d7: '7天', d30: '30天', acct: '账户', all: '全部', cur: '当前', acctN: '账户 {id}',
     edit: '改名', rnPh: '输入名称后回车', save: '保存',
     nodata: '最近 {n} 天还没有数据，发一条消息后开始统计',
@@ -827,7 +893,7 @@ const STR = {
     left: '剩{t}', uD: '天', uH: '小时', uM: '分钟', qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
   },
   'zh-TW': {
-    session: '目前工作階段', today: '今日', hit: '快取命中', vHide: '收合', vBrief: '簡略', vFull: '詳細',
+    session: '目前工作階段', log: '記錄', today: '今日', hit: '快取命中', vHide: '收合', vBrief: '簡略', vFull: '詳細',
     d1: '1天', d7: '7天', d30: '30天', acct: '帳號', all: '全部', cur: '目前', acctN: '帳號 {id}',
     edit: '改名', rnPh: '輸入名稱後按 Enter', save: '儲存',
     nodata: '最近 {n} 天還沒有資料，傳送一則訊息後開始統計',
@@ -841,7 +907,7 @@ const STR = {
     qEmpty: '還沒有限額讀數（僅訂閱帳號），傳送一則訊息後出現', tUsage: '概覽', tQuota: '額度', tModels: '模型', tDaily: '每日',
   },
   ja: {
-    session: 'セッション', today: '今日', hit: 'キャッシュ命中', vHide: '隠す', vBrief: '簡易', vFull: '詳細',
+    session: 'セッション', log: '履歴', today: '今日', hit: 'キャッシュ命中', vHide: '隠す', vBrief: '簡易', vFull: '詳細',
     d1: '1日', d7: '7日', d30: '30日', acct: 'アカウント', all: 'すべて', cur: '現在', acctN: 'アカウント {id}',
     edit: '名前変更', rnPh: '名前を入力して Enter', save: '保存',
     nodata: '直近 {n} 日のデータはまだありません。次のメッセージから集計します。',
@@ -855,7 +921,7 @@ const STR = {
     qEmpty: '上限の読み取りはまだありません（サブスクリプションのみ）。次のメッセージ後に表示されます。', tUsage: '概要', tQuota: '利用枠', tModels: 'モデル', tDaily: '日別',
   },
   ko: {
-    session: '현재 세션', today: '오늘', hit: '캐시 적중', vHide: '숨기기', vBrief: '간략', vFull: '자세히',
+    session: '현재 세션', log: '기록', today: '오늘', hit: '캐시 적중', vHide: '숨기기', vBrief: '간략', vFull: '자세히',
     d1: '1일', d7: '7일', d30: '30일', acct: '계정', all: '전체', cur: '현재', acctN: '계정 {id}',
     edit: '이름 변경', rnPh: '이름 입력 후 Enter', save: '저장',
     nodata: '최근 {n}일 데이터가 아직 없습니다. 다음 메시지부터 집계합니다.',
@@ -869,7 +935,7 @@ const STR = {
     qEmpty: '아직 한도 정보가 없습니다(구독 계정만). 다음 메시지 후 표시됩니다.', tUsage: '개요', tQuota: '한도', tModels: '모델', tDaily: '일별',
   },
   es: {
-    session: 'Sesión', today: 'Hoy', hit: 'Acierto de caché', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalles',
+    session: 'Sesión', log: 'Historial', today: 'Hoy', hit: 'Acierto de caché', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalles',
     d1: '1 d', d7: '7 d', d30: '30 d', acct: 'Cuenta', all: 'Todas', cur: 'actual', acctN: 'Cuenta {id}',
     edit: 'Renombrar', rnPh: 'Escribe un nombre y pulsa Enter', save: 'Guardar',
     nodata: 'Aún no hay datos de los últimos {n} días. Empieza a contar con tu próximo mensaje.',
@@ -883,7 +949,7 @@ const STR = {
     qEmpty: 'Aún no hay lectura de límites (solo cuentas de suscripción); aparece tras tu próximo mensaje.', tUsage: 'Resumen', tQuota: 'Cuota', tModels: 'Modelos', tDaily: 'Diario',
   },
   de: {
-    session: 'Sitzung', today: 'Heute', hit: 'Cache-Treffer', vHide: 'Ausblenden', vBrief: 'Kurz', vFull: 'Details',
+    session: 'Sitzung', log: 'Verlauf', today: 'Heute', hit: 'Cache-Treffer', vHide: 'Ausblenden', vBrief: 'Kurz', vFull: 'Details',
     d1: '1 T', d7: '7 T', d30: '30 T', acct: 'Konto', all: 'Alle', cur: 'aktuell', acctN: 'Konto {id}',
     edit: 'Umbenennen', rnPh: 'Namen eingeben, Enter drücken', save: 'Speichern',
     nodata: 'Noch keine Daten für die letzten {n} Tage. Die Zählung beginnt mit der nächsten Nachricht.',
@@ -897,7 +963,7 @@ const STR = {
     qEmpty: 'Noch kein Limit-Wert (nur Abo-Konten); erscheint nach der nächsten Nachricht.', tUsage: 'Übersicht', tQuota: 'Kontingent', tModels: 'Modelle', tDaily: 'Täglich',
   },
   fr: {
-    session: 'Session', today: "Aujourd'hui", hit: 'Succès du cache', vHide: 'Masquer', vBrief: 'Bref', vFull: 'Détails',
+    session: 'Session', log: 'Historique', today: "Aujourd'hui", hit: 'Succès du cache', vHide: 'Masquer', vBrief: 'Bref', vFull: 'Détails',
     d1: '1 j', d7: '7 j', d30: '30 j', acct: 'Compte', all: 'Tous', cur: 'actuel', acctN: 'Compte {id}',
     edit: 'Renommer', rnPh: 'Saisissez un nom, puis Entrée', save: 'Enregistrer',
     nodata: "Pas encore de données sur les {n} derniers jours. Le suivi commence au prochain message.",
@@ -911,7 +977,7 @@ const STR = {
     qEmpty: 'Pas encore de relevé des limites (comptes abonnés seulement) ; il apparaît après le prochain message.', tUsage: 'Aperçu', tQuota: 'Quota', tModels: 'Modèles', tDaily: 'Par jour',
   },
   pt: {
-    session: 'Sessão', today: 'Hoje', hit: 'Acerto de cache', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalhes',
+    session: 'Sessão', log: 'Histórico', today: 'Hoje', hit: 'Acerto de cache', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalhes',
     d1: '1 d', d7: '7 d', d30: '30 d', acct: 'Conta', all: 'Todas', cur: 'atual', acctN: 'Conta {id}',
     edit: 'Renomear', rnPh: 'Digite um nome e pressione Enter', save: 'Salvar',
     nodata: 'Ainda não há dados dos últimos {n} dias. A contagem começa na próxima mensagem.',
@@ -925,7 +991,7 @@ const STR = {
     qEmpty: 'Ainda não há leitura de limites (só contas de assinatura); aparece após a próxima mensagem.', tUsage: 'Resumo', tQuota: 'Cota', tModels: 'Modelos', tDaily: 'Diário',
   },
   ru: {
-    session: 'Сессия', today: 'Сегодня', hit: 'Попадания в кэш', vHide: 'Скрыть', vBrief: 'Кратко', vFull: 'Подробно',
+    session: 'Сессия', log: 'История', today: 'Сегодня', hit: 'Попадания в кэш', vHide: 'Скрыть', vBrief: 'Кратко', vFull: 'Подробно',
     d1: '1 д', d7: '7 д', d30: '30 д', acct: 'Аккаунт', all: 'Все', cur: 'текущий', acctN: 'Аккаунт {id}',
     edit: 'Переименовать', rnPh: 'Введите имя и нажмите Enter', save: 'Сохранить',
     nodata: 'Данных за последние {n} дн. пока нет. Подсчёт начнётся со следующего сообщения.',
@@ -1004,10 +1070,12 @@ export function register(on) {
     await step(() => refreshOthers($, true))
     // Readings the engine already holds (after a reload); later ones come with session.measure.
     await step(async () => saveReadings($, (await $.session.usage()).rateLimits))
+    await step(() => refreshLog($))
     await step(() => {
       checkUpdate($).catch(() => {})
       $.clock.every(3600000, () => checkUpdate($).catch(() => {}))
       $.clock.every(15000, () => refreshOthers($).catch(() => {}))
+      $.clock.every(15000, () => refreshLog($).catch(() => {}))
       // Another session's change to the shared settings (the view, a rename) shows within seconds.
       $.clock.every(3000, () => syncCfg($).catch(() => {}))
     })
@@ -1031,6 +1099,7 @@ export function register(on) {
       await ensureSession($)
       // The session just left is now one of the others: read it at once so its usage stays counted.
       await refreshOthers($)
+      await refreshLog($)
     } catch {}
     return next(e)
   })
@@ -1039,6 +1108,10 @@ export function register(on) {
   on('session.measure', async ($, e, next) => {
     try {
       if (e.changed.includes('rateLimits')) await saveReadings($, e.rateLimits)
+    } catch {}
+    // After each turn: the transcript has grown.
+    try {
+      await refreshLog($)
     } catch {}
     return next(e)
   })
@@ -1097,6 +1170,7 @@ export function register(on) {
     const editingName = (await $.state.get(S_EDITING)).value ?? false
     const editingExp = (await $.state.get(S_EXPING)).value ?? null
     const tab = (await $.state.get(S_TAB)).value ?? 'usage'
+    const qOpen = (await $.state.get(S_QOPEN)).value ?? []
     const tps = (await $.state.get(S_TPS)).value ?? null
     const now = await $.clock.now()
     const s = sessionTotals()
@@ -1125,9 +1199,18 @@ export function register(on) {
     ]
     const mid = ['⚡ ' + tpsText, tr('session') + ' ' + usdOf(s), tr('today') + ' ' + usdOf(day), tr('hit') + ' ' + hitText]
     const compact = ['⚡' + (tps ? tps.value.toFixed(0) : '—'), usdOf(s) + '/' + usdOf(day), hitText]
-    // Narrower and narrower: the model name, then the cache hit, go before the fills; the cryptic
-    // compact form is the last resort.
+    // The transcript's size, after the session's value (on the desktop, out of the size up to
+    // which it shows a transcript whole); from LOG_WARN a colored mark of its own instead, which
+    // no width drops.
+    const log = logText(e.surface)
+    const logMark = logWarns(e.surface) ? '⚠ ' + log : null
+    const withLog = (p) => (log && !logMark ? [p[0], p[1], log, ...p.slice(2)] : p)
+    // Narrower and narrower: the transcript size, the model name, then the cache hit, go before
+    // the fills; the cryptic compact form is the last resort.
     const variants = [
+      [...withLog(full), ...fillReset],
+      [...withLog(full), ...fillWide],
+      [...withLog(mid), ...fillWide],
       [...full, ...fillReset],
       [...full, ...fillWide],
       [...mid, ...fillWide],
@@ -1136,9 +1219,9 @@ export function register(on) {
       [...compact, ...fillShort],
       compact,
     ].map((p) => p.join(' · '))
-    const badge = latest
-      ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 + (expanded ? 0 : strWidth(tr('updShow')) + 2)
-      : 0
+    const badge =
+      (latest ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 + (expanded ? 0 : strWidth(tr('updShow')) + 2) : 0) +
+      (logMark ? strWidth(logMark) + 2 : 0)
     const langW = expanded ? strWidth(cfg.lang === 'auto' ? 'Auto · ' + LANG_NAMES[autoLang] : LANG_NAMES[cfg.lang] || '') + 8 : 0
     // The view switch is in the prompt footer (SessionMode), not here.
     const room = cols - badge - langW
@@ -1150,6 +1233,7 @@ export function register(on) {
       columnGap: 2,
       children: [
         Text({ dimColor: true, wrap: 'truncate-end', children: [status] }),
+        ...(logMark ? [Text({ color: logColor(), children: [logMark] })] : []),
         ...(latest ? [Text({ color: 'yellow', children: ['⬆ ' + tr('upd', { v: 'v' + latest })] })] : []),
         // Opens the card, where the update command is.
         ...(latest && !expanded
@@ -1195,7 +1279,7 @@ export function register(on) {
       children.push(Text({ color: 'yellow', children: [tr('updHow')] }))
       children.push(Code({ source: updateCommand($), language: 'sh' }))
     }
-    if (expanded) children.push(detailView($, els, now, cols, editingName, tab, editingExp))
+    if (expanded) children.push(detailView($, els, now, cols, editingName, tab, editingExp, qOpen))
     const rest = await next(e)
     if (rest) children.push(rest)
     return children.length === 1 ? line : Box({ flexDirection: 'column', children })
@@ -1209,12 +1293,15 @@ export function register(on) {
     const view = curView()
     const tps = (await $.state.get(S_TPS)).value ?? null
     const label = '⚡' + (tps ? tps.value.toFixed(0) : '—') + ' · ' + usdOf(sessionTotals()) + (latest ? ' ⬆' : '')
+    // The transcript's size, colored from LOG_WARN on the desktop.
+    const size = logBytes === null ? null : fmtMB(logBytes) + 'MB'
     const at = VIEWS.findIndex(([v]) => v === view)
     const entry = Box({
       flexDirection: 'row',
       columnGap: 2,
       children: [
         Text({ dimColor: true, children: [label] }),
+        ...(size ? [Text(logWarns(e.surface) ? { color: logColor(), children: [size] } : { dimColor: true, children: [size] })] : []),
         Button({
           key: 'view-cycle',
           label: '[' + tr(VIEWS[at][1]) + ']',
@@ -1232,7 +1319,7 @@ export function register(on) {
 // quota estimate, per-model share and TPS, or per-day value. One tab at a time keeps the card
 // within the band's rows (a taller tree scrolls inside the band).
 // cols is the band's width; the card's inside is 4 cells narrower (border and padding).
-function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingName, tab, editingExp) {
+function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingName, tab, editingExp, qOpen) {
   const inner = Math.max(30, cols - 4)
   const wide = inner >= 66
   const range = Number(cfg.range)
@@ -1392,19 +1479,38 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
       const q = est?.q ?? prev?.q ?? null
       const need = q === null && est?.need ? ' ' + tr('qNeed', { n: pctOf(est.need) }) : ''
       const barW = Math.max(6, Math.min(20, Math.floor(inner / 5)))
-      const resetW = Math.max(14, Math.min(34, inner - 6 - barW - 10 - 3))
+      // The fold toggle after the bar: 2 cells and a gap.
+      const resetW = Math.max(14, Math.min(34, inner - 6 - barW - 10 - 3 - 3))
       const text = tr('qPred', { w, q: q === null ? '—' : fmtUsd(q) }) + need
+      // The live window's use by model, folded under its row until its toggle opens it.
+      const { models, old } = live ? windowModels(a, live.r - WINDOWS[kind], now) : { models: [], old: 0 }
+      const openKey = a + '|' + kind
+      const hasUse = models.length > 0 || old > 0
+      const isOpen = hasUse && qOpen.includes(openKey)
+      const toggle = hasUse
+        ? Box({
+            width: 2,
+            children: [
+              Button({
+                key: 'q-open-' + a + '-' + kind,
+                label: isOpen ? '▾' : '▸',
+                plain: true,
+                onPress: () => $.state.set(S_QOPEN, isOpen ? qOpen.filter((k) => k !== openKey) : [...qOpen, openKey]),
+              }),
+            ],
+          })
+        : cell(2, '')
       quota.push(
         row([
-          cell(Math.max(10, Math.min(28, inner - 6 - barW - resetW - 3)), text),
+          cell(Math.max(10, Math.min(28, inner - 6 - barW - resetW - 3 - 3)), text),
           num(6, live ? pctOf(live.p) : '—'),
           bar(barW, live ? Math.min(1, live.p / 100) : 0),
+          toggle,
           cell(resetW, live ? '→ ' + fmtReset(live.r, now) + ' · ' + fmtLeft(live.r, now) : '', { dimColor: true }),
         ]),
       )
-      // The live window's use by model: input (all), output, value.
-      if (live) {
-        const { models, old } = windowModels(a, live.r - WINDOWS[kind], now)
+      // Opened: input (all), output and value by model, then the window's total.
+      if (isOpen) {
         // Name, the three parts of the input (uncached, cache read, cache write), their sum,
         // output, value;
         // each token column as wide as its label and the longest number the format gives.
@@ -1430,18 +1536,16 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
         }
         if (old > 0) quota.push(row([cell(2, ''), cell(nameW + rawW + cacheW + cwW + inW + outW + 5, tr('qOld'), { dimColor: true }), num(9, fmtUsd(old))]))
         // The window's total: the tokens of the split use, the value of all of it.
-        if (models.length || old > 0) {
-          const sum = (f) => models.reduce((n, [, r]) => n + r[f], 0)
-          const all = { i: sum('i'), cr: sum('cr'), cw: sum('cw'), o: sum('o') }
-          quota.push(
-            row([
-              cell(2, ''),
-              cell(nameW, tr('total'), { bold: true }),
-              ...tokCells(all, { bold: true }),
-              Box({ width: 9, justifyContent: 'flex-end', children: [Text({ bold: true, children: [fmtUsd(sum('u') + old)] })] }),
-            ]),
-          )
-        }
+        const sum = (f) => models.reduce((n, [, r]) => n + r[f], 0)
+        const all = { i: sum('i'), cr: sum('cr'), cw: sum('cw'), o: sum('o') }
+        quota.push(
+          row([
+            cell(2, ''),
+            cell(nameW, tr('total'), { bold: true }),
+            ...tokCells(all, { bold: true }),
+            Box({ width: 9, justifyContent: 'flex-end', children: [Text({ bold: true, children: [fmtUsd(sum('u') + old)] })] }),
+          ]),
+        )
       }
     }
   }

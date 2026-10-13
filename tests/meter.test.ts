@@ -32,6 +32,10 @@ type World = {
   liveStore?: Map<string, unknown>
   published?: string | null
   rateLimits?: { kind: string; percentUsed: number; resetsAt?: string }[]
+  // Transcript files by full path and their size in bytes; change it to grow one.
+  logs?: Record<string, number>
+  // Folders listed under .../.claude/projects.
+  projectDirs?: string[]
 }
 
 // Answers every noun the plugin calls beneath it. Files are matched by path suffix, so the
@@ -55,7 +59,18 @@ function world(on: On, w: World) {
     if (!hit) throw new Error('ENOENT: ' + e.path)
     return { value: files[hit] }
   })
-  on('fs.list', () => ({ value: [] }))
+  const logs = w.logs ?? {}
+  on('session.root', () => ({ value: '/work' }))
+  on('fs.exists', ($, e) => ({ value: e.path in logs }))
+  on('fs.stat', ($, e) => {
+    if (!(e.path in logs)) throw new Error('ENOENT: ' + e.path)
+    return { value: { kind: 'file', size: logs[e.path], mtimeMs: NOW, isLink: false } }
+  })
+  on('fs.list', ($, e) => ({
+    value: e.path.endsWith('/.claude/projects')
+      ? (w.projectDirs ?? []).map((name) => ({ name, kind: 'dir', size: 0, mtimeMs: NOW, isLink: false }))
+      : [],
+  }))
   on('http.fetch', () =>
     w.published
       ? { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ version: w.published }) } }
@@ -465,6 +480,45 @@ test('quota: a session open across an early reset starts over from its first rea
   }
 })
 
+test('quota: a late reading a little lower, or one later readings climb back above, is not a reset', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  const r = NOW + 2 * H
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: {
+      cfg: enCfg,
+      // Read at 0% first, 37% and 91% by other sessions; then two late readings, saved after the
+      // 91% one: 84% (7 points lower, but 93% follows) and 89% (2 points lower).
+      's:a': {
+        upd: NOW,
+        days: {},
+        base: { [id]: { five_hour: { p: 0, r, at: NOW - 160 * 60000 } } },
+        rl: { [id]: { five_hour: { p: 89, r, at: NOW - 6 * 60000 } } },
+        b: { [bucket(NOW - 2 * H)]: { [id]: { u: 28.3 } }, [bucket(NOW)]: { [id]: { u: 0.8 } } },
+      },
+      's:b': { upd: NOW, days: {}, base: { [id]: { five_hour: { p: 37, r, at: NOW - 2 * H } } } },
+      's:c': {
+        upd: NOW,
+        days: {},
+        base: { [id]: { five_hour: { p: 91, r, at: NOW - 7 * 60000 } } },
+        rl: { [id]: { five_hour: { p: 93, r, at: NOW - 5 * 60000 } } },
+      },
+      's:d': { upd: NOW, days: {}, base: { [id]: { five_hour: { p: 84, r, at: NOW - 6.5 * 60000 } } } },
+    },
+  })
+  await start($, 'desktop')
+  await measure($, [{ kind: 'five_hour', percentUsed: 97, resetsAt: iso(r) }])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await $.command.run({ command: 'meter', args: '' } as any)
+    await ui.press({ key: 'tab-quota' })
+    // $29.10 since the 0% reading over 97%; starting over from the 89% reading would give $10.
+    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$30\.00$/ })).toBeDefined()
+    await $.command.run({ command: 'meter', args: '' } as any)
+    await ui.unmount()
+  }
+})
+
 test('quota: a CLI session whose ~/.claude.json names another account is filed under the true one', async ($, on) => {
   const named = await hash('uuid-cli')
   const real = await hash('uuid-real')
@@ -785,6 +839,11 @@ test('quota: each live window lists its use by model, earlier unsplit use on a l
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
+    // Folded at first: only the windows' rows, each with its toggle.
+    expect(await ui.find({ type: 'Text', text: /^opus-5-5$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'Total' })).toBeUndefined()
+    await ui.press({ key: `q-open-${id}-five_hour` })
+    await ui.press({ key: `q-open-${id}-seven_day` })
     // Both windows list the two models, the larger value first.
     const names = (await ui.findAll({ type: 'Text', text: /^opus-5-5$|^sonnet-5-5$/ })).map((x) => x.text)
     expect(names).toEqual(['opus-5-5', 'sonnet-5-5', 'opus-5-5', 'sonnet-5-5'])
@@ -807,6 +866,10 @@ test('quota: each live window lists its use by model, earlier unsplit use on a l
     expect(await ui.find({ type: 'Text', text: 'Output 300.0K' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '$7.00' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '$37.00' })).toBeDefined()
+    // Folding one window again takes its rows away and leaves the other's.
+    await ui.press({ key: `q-open-${id}-five_hour` })
+    expect((await ui.findAll({ type: 'Text', text: 'Total' })).length).toBe(1)
+    await ui.press({ key: `q-open-${id}-seven_day` })
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -830,6 +893,8 @@ test('a response is recorded in its bucket by model as well', async ($, on) => {
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
   await $.command.run({ command: 'meter', args: '' } as any)
   await ui.press({ key: 'tab-quota' })
+  const id = await hash('uuid-desktop')
+  await ui.press({ key: `q-open-${id}-five_hour` })
   expect(await ui.find({ type: 'Text', text: /^sonnet-5-5$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Earlier use/ })).toBeUndefined()
   await ui.unmount()
@@ -862,4 +927,67 @@ test('subscription end: the field opens under its own account, not at the foot o
   expect(await ui.find({ type: 'Text', text: /· home · Subscription ends 2026-10-12/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /· work · UTC\+8$/ })).toBeDefined()
   await ui.unmount()
+})
+
+const MB = 1048576
+
+test('transcript size: after the session value, out of 50MB on the desktop, marked from 40MB', async ($, on) => {
+  const path = '/Users/mac/.claude/projects/-work/session-1.jsonl'
+  const logs = { [path]: 18 * MB }
+  world(on, { env: { HOME: '/Users/mac' }, logs })
+  await start($, 'desktop')
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
+    // The 50MB limit is the desktop app's: the terminal shows the size alone.
+    const shown = surface === 'desktop' ? 'Transcript 18.0/50MB' : 'Transcript 18.0MB'
+    expect(await ui.find({ type: 'Text', text: new RegExp('Session \\$0\\.00 · ' + shown.replace('.', '\\.') + ' · Today') })).toBeDefined()
+    expect(await foot.find({ type: 'Text', text: '18.0MB' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /⚠/ })).toBeUndefined()
+    await ui.unmount()
+    await foot.unmount()
+  }
+
+  // Grown past 40MB: a yellow mark on the desktop, the plain size in the terminal; red past 50MB.
+  for (const [mb, color] of [[45, 'yellow'], [52.3, 'red']] as const) {
+    logs[path] = mb * MB
+    await measure($, [])
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+      const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
+      const size = mb.toFixed(1)
+      if (surface === 'desktop') {
+        expect((await ui.find({ type: 'Text', text: `⚠ Transcript ${size}/50MB` }))?.props.color).toBe(color)
+        expect((await foot.find({ type: 'Text', text: `${size}MB` }))?.props.color).toBe(color)
+      } else {
+        expect(await ui.find({ type: 'Text', text: new RegExp(`Transcript ${size.replace('.', '\\.')}MB`) })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: /⚠/ })).toBeUndefined()
+        expect((await foot.find({ type: 'Text', text: `${size}MB` }))?.props.dimColor).toBe(true)
+      }
+      await ui.unmount()
+      await foot.unmount()
+    }
+  }
+})
+
+test('transcript size: found in another project folder when the root does not name it', async ($, on) => {
+  world(on, {
+    env: { HOME: '/Users/mac' },
+    projectDirs: ['-other', '-moved'],
+    logs: { '/Users/mac/.claude/projects/-moved/session-1.jsonl': 3.25 * MB },
+  })
+  await start($, 'desktop')
+  const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
+  expect(await ui.find({ type: 'Text', text: /Transcript 3\.3\/50MB/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('transcript size: nothing shown before the transcript is written', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac' } })
+  await start($, 'desktop')
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    expect(await ui.find({ type: 'Text', text: /Transcript/ })).toBeUndefined()
+    await ui.unmount()
+  }
 })
