@@ -40,10 +40,8 @@ type World = {
   logs?: Record<string, number>
   // Folders listed under .../.claude/projects.
   projectDirs?: string[]
-  // What `head` prints of a transcript, by full path; change it to rewrite one. noHead: no `head`
-  // command (Windows), so the file is read whole through `files`.
-  heads?: Record<string, string>
-  noHead?: boolean
+  // Files listed in a folder (a transcript's subagents), by the folder's full path.
+  lists?: Record<string, string[]>
 }
 
 // Answers every noun the plugin calls beneath it. Files are matched by path suffix, so the
@@ -58,11 +56,13 @@ function world(on: On, w: World) {
     on('store.keys', () => ({ value: [...m.keys()] }))
   } else mock.store(on, w.store ?? {})
   mock.env(on, w.env)
-  const files: Record<string, string> = { '/.claude-plugin/plugin.json': JSON.stringify({ version: '0.4.0' }), ...(w.files ?? {}) }
+  // Read at each call, so a test can change a file (rewrite a transcript) as it goes.
+  const filesNow = (): Record<string, string> => ({ '/.claude-plugin/plugin.json': JSON.stringify({ version: '0.4.0' }), ...(w.files ?? {}) })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
   on('session.id', () => ({ value: 'session-1' }))
   on('fs.read', ($, e) => {
+    const files = filesNow()
     const hit = Object.keys(files).find((k) => e.path.replace(/\\/g, '/').endsWith(k))
     if (!hit) throw new Error('ENOENT: ' + e.path)
     return { value: files[hit] }
@@ -74,15 +74,10 @@ function world(on: On, w: World) {
     if (!(e.path in logs)) throw new Error('ENOENT: ' + e.path)
     return { value: { kind: 'file', size: logs[e.path], mtimeMs: NOW, isLink: false } }
   })
-  on('process.run', ($, e) => {
-    if (w.noHead || e.argv[0] !== 'head') throw new Error('ENOENT: ' + e.argv[0])
-    const stdout = (w.heads ?? {})[e.argv[e.argv.length - 1]] ?? ''
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
   on('fs.list', ($, e) => ({
     value: e.path.endsWith('/.claude/projects')
       ? (w.projectDirs ?? []).map((name) => ({ name, kind: 'dir', size: 0, mtimeMs: NOW, isLink: false }))
-      : [],
+      : ((w.lists ?? {})[e.path] ?? []).map((name) => ({ name, kind: 'file', size: 0, mtimeMs: NOW, isLink: false })),
   }))
   on('http.fetch', () =>
     w.published
@@ -1027,36 +1022,30 @@ async function expectCut($: any, isCut: boolean, size: string) {
 }
 
 test('transcript cut: one that starts at a compaction is marked on every surface', async ($, on) => {
-  world(on, { env: { HOME: '/Users/mac' }, logs: { [LOG]: 3 * MB }, heads: { [LOG]: jsonl(meta, boundary, { ...prompt, uuid: 'u1', parentUuid: 'b1' }) } })
+  const clock = world(on, { env: { HOME: '/Users/mac' }, logs: { [LOG]: 3 * MB }, files: { [LOG]: jsonl(meta, boundary, { ...prompt, uuid: 'u1', parentUuid: 'b1' }) } })
   await start($, 'desktop')
+  // Read on a timer of its own, not before the first prompt.
+  await expectCut($, false, '3.0MB')
+  await clock.advance(1)
   await expectCut($, true, '3.0MB')
 })
 
 test('transcript cut: a compacted one that starts with the conversation is not marked', async ($, on) => {
-  world(on, { env: { HOME: '/Users/mac' }, logs: { [LOG]: 3 * MB }, heads: { [LOG]: jsonl(meta, prompt, boundary) } })
+  const clock = world(on, { env: { HOME: '/Users/mac' }, logs: { [LOG]: 3 * MB }, files: { [LOG]: jsonl(meta, prompt, boundary) } })
   await start($, 'desktop')
+  await clock.advance(1)
   await expectCut($, false, '3.0MB')
-})
-
-test('transcript cut: told from the whole file where there is no head command', async ($, on) => {
-  world(on, {
-    env: { HOME: '/Users/mac' },
-    noHead: true,
-    logs: { [LOG]: 3 * MB },
-    files: { [LOG]: jsonl(meta, boundary, { ...prompt, uuid: 'u1', parentUuid: 'b1' }) },
-  })
-  await start($, 'desktop')
-  await expectCut($, true, '3.0MB')
 })
 
 test('transcript cut: the mark goes once the earlier conversation is put back in front', async ($, on) => {
   const logs = { [LOG]: 3 * MB }
-  const heads = { [LOG]: jsonl(meta, boundary, { ...prompt, uuid: 'u1', parentUuid: 'b1' }) }
-  world(on, { env: { HOME: '/Users/mac' }, logs, heads })
+  const files = { [LOG]: jsonl(meta, boundary, { ...prompt, uuid: 'u1', parentUuid: 'b1' }) }
+  const clock = world(on, { env: { HOME: '/Users/mac' }, logs, files })
   await start($, 'desktop')
+  await clock.advance(1)
   await expectCut($, true, '3.0MB')
   // A turn adds a little: not read again.
-  heads[LOG] = jsonl(meta, prompt)
+  files[LOG] = jsonl(meta, prompt)
   logs[LOG] = 3.4 * MB
   await measure($, [])
   await expectCut($, true, '3.4MB')
@@ -1087,4 +1076,64 @@ test('transcript size: kept in the status line at every width, in the brief and 
       await ui.unmount()
     }
   }
+})
+
+test('session value: every response in the transcript, subagents too, each once, then what is recorded here', async ($, on) => {
+  const use = (o: number, cr = 0) => ({ input_tokens: 0, output_tokens: o, cache_read_input_tokens: cr, cache_creation_input_tokens: 0 })
+  const resp = (uuid: string, id: string, model: string, usage: object) => ({
+    type: 'assistant',
+    uuid,
+    parentUuid: null,
+    message: { id, model, role: 'assistant', usage, content: [] },
+    sessionId: 'session-1',
+  })
+  const agents = '/Users/mac/.claude/projects/-work/session-1/subagents'
+  const clock = world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: { cfg: enCfg },
+    logs: { [LOG]: 3 * MB },
+    files: {
+      [LOG]: jsonl(
+        meta,
+        prompt,
+        // One response written as two rows, the last with its whole usage: $2.00 + $0.20 once.
+        resp('r1', 'msg_1', 'claude-opus-5-5', use(10)),
+        resp('r2', 'msg_1', 'claude-opus-5-5', use(100000, 1000000)),
+        // A placeholder the engine wrote: no tokens, no price, not counted.
+        resp('r3', 'msg_2', '<synthetic>', use(0)),
+        resp('r4', 'msg_3', 'claude-opus-5-5', use(40000)),
+      ),
+      [agents + '/agent-1.jsonl']: jsonl(resp('r5', 'msg_4', 'claude-sonnet-5-5', use(100000))),
+    },
+    lists: { [agents]: ['agent-1.jsonl'] },
+  })
+  const usage = { input_tokens: 10, output_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('turn.step', async function* ($: any, e: any, next: any) {
+    yield { kind: 'text', index: 0, text: 'x' }
+    await clock.advance(1000)
+    yield { kind: 'stop', stopReason: 'end_turn', usage }
+    return { turnId: e.turnId, index: e.index, answer: 'x', toolUses: [], stopReason: 'end_turn', usage }
+  } as any)
+  const shows = async (usd: string) => {
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+      const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
+      expect(await ui.find({ type: 'Text', text: new RegExp('Session \\' + usd + ' ') })).toBeDefined()
+      expect(await foot.find({ type: 'Text', text: new RegExp(' · \\' + usd + '$') })).toBeDefined()
+      await ui.unmount()
+      await foot.unmount()
+    }
+  }
+  await start($, 'desktop')
+  // Before the transcript is read, this session's own record: nothing yet.
+  await shows('$0.00')
+  await clock.advance(1)
+  // $2.20 + $0.80 (opus) + $1.00 (the subagent's sonnet).
+  await shows('$4.00')
+  // A response in this session: $0.01 more.
+  const stream: any = $.turn.step({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1 } as any)
+  for await (const _ of stream) {
+  }
+  await stream.result
+  await shows('$4.01')
 })

@@ -231,14 +231,18 @@ function scheduleFlush($) {
 const LOG_LIMIT = 50 * 1048576
 const LOG_WARN = 40 * 1048576
 const LOG_SCAN_MS = 5 * 60000
-// How much of the file's start is read to tell whether it was cut, and the growth between two
-// checks that means it was rewritten (as when the earlier conversation is put back in front).
-const LOG_HEAD = 262144
+// The growth between two checks that means the file was rewritten (as when the earlier
+// conversation is put back in front of it), and the largest file read through (see scanLog).
 const LOG_JUMP = 5 * 1048576
-// cut: whether the transcript starts at a compaction (see startsCut); undefined until checked,
-// null when that could not be told.
-let logFile = { sid: null, path: null, scannedAt: 0, cut: undefined }
+const LOG_SCAN_MAX = 200 * 1048576
+// cut: whether the transcript starts at a compaction (see readLog); undefined until read, null
+// when that could not be told. scanned: read since it was found or rewritten.
+let logFile = { sid: null, path: null, scannedAt: 0, cut: undefined, scanned: false }
 let logBytes = null // size of this session's transcript, null until it is found
+// The value of the responses in the transcript when it was read, and this session's own record
+// (sessionTotals) at that moment: what was recorded after is added on.
+let logTotals = null
+let logSnap = null
 const fmtMB = (b) => (b >= 100 * 1048576 ? (b / 1048576).toFixed(0) : (b / 1048576).toFixed(1))
 
 // <config>/projects/<the session root, every character but letters and digits as "-">/<id>.jsonl.
@@ -266,34 +270,69 @@ async function findLog($) {
 // that starts at that compaction: the conversation before it stays in the old file, and the app
 // shows the new one alone. Its first message is the compaction boundary; any other transcript,
 // a compacted one too, starts with a message of the conversation.
-async function startsCut($, path) {
-  let head = null
-  try {
-    const run = await $.process.run(['head', '-c', String(LOG_HEAD), path], { timeoutMs: 5000 })
-    if (run.exitCode === 0) head = run.stdout
-  } catch {}
-  // No head (Windows): the whole file.
-  if (head === null) head = await $.fs.read(path)
-  for (const line of head.split('\n')) {
-    if (!line.includes('"uuid"')) continue
-    let row
-    try {
-      row = JSON.parse(line)
-    } catch {
-      continue
+// The session's value is the transcript's own: every response in it (a merged-back history and
+// what came before this plugin included), its subagents' too, then what is recorded here since.
+// A response is written as several rows, the last with its whole usage: counted once, by its id.
+function readLog(texts) {
+  let cut = null
+  const byMsg = new Map()
+  texts.forEach((text, k) => {
+    for (const line of text.split('\n')) {
+      const isFirst = k === 0 && cut === null && line.includes('"uuid"')
+      if (!isFirst && !(line.includes('"usage"') && line.includes('"assistant"'))) continue
+      let row
+      try {
+        row = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (isFirst && typeof row?.uuid === 'string' && ['user', 'assistant', 'system', 'attachment'].includes(row.type)) {
+        cut = row.type === 'system' && row.subtype === 'compact_boundary'
+      }
+      const m = row?.message
+      if (row?.type === 'assistant' && m?.id && m.usage) byMsg.set(k + ':' + m.id, [m.model || '', m.usage])
     }
-    if (typeof row?.uuid !== 'string' || !['user', 'assistant', 'system', 'attachment'].includes(row.type)) continue
-    return row.type === 'system' && row.subtype === 'compact_boundary'
+  })
+  const tot = emptyTotals()
+  for (const [model, u] of byMsg.values()) {
+    const r = { i: u.input_tokens || 0, o: u.output_tokens || 0, cr: u.cache_read_input_tokens || 0, cw: u.cache_creation_input_tokens || 0 }
+    // A placeholder the engine wrote itself (<synthetic>) carries no tokens.
+    if (r.i + r.o + r.cr + r.cw === 0) continue
+    const key = modelKey(model, u)
+    if (!priceOf(key)) tot.unpriced = true
+    for (const f of ['i', 'o', 'cr', 'cw']) tot[f] += r[f]
+    tot.n += 1
+    tot.usd += rowUsd(key, r)
   }
-  return null
+  return { cut, tot }
+}
+async function scanLog($) {
+  const path = logFile.path
+  if (!path || logBytes === null) return
+  logFile.scanned = true
+  if (logBytes > LOG_SCAN_MAX) return
+  // Taken before the read: a response recorded while it runs counts here, not in the file.
+  const snap = sessionTotals()
+  const texts = [await $.fs.read(path)]
+  try {
+    const dir = path.slice(0, -'.jsonl'.length) + '/subagents'
+    for (const e of await $.fs.list(dir)) if (e.kind === 'file' && e.name.endsWith('.jsonl')) texts.push(await $.fs.read(dir + '/' + e.name))
+  } catch {}
+  const { cut, tot } = readLog(texts)
+  logFile.cut = cut
+  logTotals = tot
+  logSnap = snap
+  $.ui.invalidate('ui.render')
 }
 // What the band shows of the transcript; it redraws only when this changes.
 const logShown = () => (logBytes === null ? null : fmtMB(logBytes) + (logFile.cut ? ' cut' : ''))
-async function refreshLog($) {
+// defer: read the file on a timer of its own, so that the session's start does not wait for it.
+async function refreshLog($, { defer = false } = {}) {
   await ensureSession($)
   if (logFile.sid !== sid) {
-    logFile = { sid, path: null, scannedAt: 0, cut: undefined }
+    logFile = { sid, path: null, scannedAt: 0, cut: undefined, scanned: false }
     logBytes = null
+    logTotals = null
   }
   const before = logShown()
   if (!logFile.path) logFile.path = await findLog($)
@@ -303,13 +342,14 @@ async function refreshLog($) {
     if (st && st.kind === 'file') bytes = st.size
     else logFile.path = null
   }
-  // Told once the file is found, and again when it was rewritten: it shrank, or grew by more
+  // Read once the file is found, and again when it was rewritten: it shrank, or grew by more
   // than a turn writes.
-  const rewritten = logBytes !== null && bytes !== null && (bytes < logBytes || bytes - logBytes > LOG_JUMP)
-  if (bytes !== null && (logFile.cut === undefined || rewritten)) {
-    logFile.cut = await startsCut($, logFile.path).catch(() => null)
-  }
+  if (logBytes !== null && bytes !== null && (bytes < logBytes || bytes - logBytes > LOG_JUMP)) logFile.scanned = false
   logBytes = bytes
+  if (bytes !== null && !logFile.scanned) {
+    if (!defer) await scanLog($).catch(() => {})
+    else $.clock.after(0, () => (logFile.scanned ? undefined : scanLog($).catch(() => {})))
+  }
   if (logShown() !== before) $.ui.invalidate('ui.render')
 }
 // "Transcript 18.0/50MB" on the desktop, where the limit applies; "Transcript 18.0MB" elsewhere.
@@ -561,6 +601,16 @@ function sessionTotals() {
       }
     }
   }
+  return t
+}
+// What the band shows as the session's value: the transcript's (see scanLog) plus what this
+// session recorded since it was read; this session's own record until it is read, or where the
+// transcript is not found.
+function sessionShown() {
+  const s = sessionTotals()
+  if (!logTotals || !logSnap) return s
+  const t = { ...logTotals, gms: s.gms, gtok: s.gtok, unpriced: logTotals.unpriced || s.unpriced }
+  for (const f of ['i', 'o', 'cr', 'cw', 'n', 'usd']) t[f] += Math.max(0, s[f] - logSnap[f])
   return t
 }
 
@@ -1111,7 +1161,7 @@ export function register(on) {
     await step(() => refreshOthers($, true))
     // Readings the engine already holds (after a reload); later ones come with session.measure.
     await step(async () => saveReadings($, (await $.session.usage()).rateLimits))
-    await step(() => refreshLog($))
+    await step(() => refreshLog($, { defer: true }))
     await step(() => {
       checkUpdate($).catch(() => {})
       $.clock.every(3600000, () => checkUpdate($).catch(() => {}))
@@ -1214,7 +1264,7 @@ export function register(on) {
     const qOpen = (await $.state.get(S_QOPEN)).value ?? []
     const tps = (await $.state.get(S_TPS)).value ?? null
     const now = await $.clock.now()
-    const s = sessionTotals()
+    const s = sessionShown()
     const cur = shownAcct()
     const dayAgg = aggregate(1, cur === 'unknown' ? 'all' : cur, now)
     const day = dayAgg.tot
@@ -1345,7 +1395,7 @@ export function register(on) {
     const { Box, Text, Button } = $.ui.resolve(e)
     const view = curView()
     const tps = (await $.state.get(S_TPS)).value ?? null
-    const label = '⚡' + (tps ? tps.value.toFixed(0) : '—') + ' · ' + usdOf(sessionTotals()) + (latest ? ' ⬆' : '')
+    const label = '⚡' + (tps ? tps.value.toFixed(0) : '—') + ' · ' + usdOf(sessionShown()) + (latest ? ' ⬆' : '')
     // The transcript's size, colored from LOG_WARN on the desktop; ✂ when it was cut.
     const size = logBytes === null ? null : fmtMB(logBytes) + 'MB' + (isLogCut() ? ' ✂' : '')
     const at = VIEWS.findIndex(([v]) => v === view)
