@@ -1067,7 +1067,7 @@ test('transcript cut: the mark goes once the earlier conversation is put back in
 })
 
 test('transcript size: kept in the status line at every width, in the brief and the detailed view', async ($, on) => {
-  world(on, { env: { HOME: '/Users/mac' }, store: { cfg: enCfg }, logs: { [LOG]: 18 * MB } })
+  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg }, logs: { [LOG]: 18 * MB } })
   await start($, 'desktop')
   await measure($, [
     { kind: 'five_hour', percentUsed: 17, resetsAt: iso(NOW + 2 * H) },
@@ -1080,6 +1080,8 @@ test('transcript size: kept in the status line at every width, in the brief and 
         if (view === 'detailed') await $.command.run({ command: 'meter', args: '' } as any)
         const line = await ui.find({ type: 'Text', text: /^⚡/ })
         expect([surface, cols, view, line?.text]).toEqual([surface, cols, view, expect.stringMatching(/ · (Transcript )?18\.0(\/50)?MB( · |$)/)])
+        // The labels stay longer than the size's own: at 70 columns the line still has them.
+        if (cols === 70 && view === 'brief') expect(line?.text).toMatch(/^⚡ — tok\/s · Session \$0\.00 · (Transcript )?18\.0MB · Today \$0\.00 · 17%\/73%$/)
       }
       await $.command.run({ command: 'meter', args: '' } as any)
       await ui.unmount()

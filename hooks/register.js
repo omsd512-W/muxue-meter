@@ -1253,14 +1253,19 @@ export function register(on) {
     const inLine = log && !logMark ? log : null
     const withLog = (p, text = inLine) => (text ? [p[0], p[1], text, ...p.slice(2)] : p)
     const logShort = inLine ? fmtMB(logBytes) + 'MB' : null
-    // Narrower and narrower: the model name, then the cache hit, go before the fills; the cryptic
-    // compact form is the last resort.
+    // The labelled line with the speed as short as in the compact form.
+    const tight = [compact[0], ...mid.slice(1, 3)]
+    // Narrower and narrower: the model name, the cache hit, the fills' labels, the size's label,
+    // then the speed's, go before the labels of the values; the cryptic compact form is the last
+    // resort.
     const variants = [
       [...withLog(full), ...fillReset],
       [...withLog(full), ...fillWide],
       [...withLog(mid), ...fillWide],
       [...withLog(mid.slice(0, 3)), ...fillWide],
       [...withLog(mid.slice(0, 3)), ...fillShort],
+      [...withLog(mid.slice(0, 3), logShort), ...fillShort],
+      [...withLog(tight, logShort), ...fillShort],
       [...withLog(compact, logShort), ...fillShort],
       withLog(compact, logShort),
       compact,
