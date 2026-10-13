@@ -1065,3 +1065,24 @@ test('transcript cut: the mark goes once the earlier conversation is put back in
   await measure($, [])
   await expectCut($, false, '18.4MB')
 })
+
+test('transcript size: kept in the status line at every width, in the brief and the detailed view', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac' }, store: { cfg: enCfg }, logs: { [LOG]: 18 * MB } })
+  await start($, 'desktop')
+  await measure($, [
+    { kind: 'five_hour', percentUsed: 17, resetsAt: iso(NOW + 2 * H) },
+    { kind: 'seven_day', percentUsed: 73, resetsAt: iso(NOW + 72 * H) },
+  ])
+  for (const surface of SURFACES) {
+    for (const cols of [120, 90, 70, 50]) {
+      const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(cols) })
+      for (const view of ['brief', 'detailed']) {
+        if (view === 'detailed') await $.command.run({ command: 'meter', args: '' } as any)
+        const line = await ui.find({ type: 'Text', text: /^⚡/ })
+        expect([surface, cols, view, line?.text]).toEqual([surface, cols, view, expect.stringMatching(/ · (Transcript )?18\.0(\/50)?MB( · |$)/)])
+      }
+      await $.command.run({ command: 'meter', args: '' } as any)
+      await ui.unmount()
+    }
+  }
+})

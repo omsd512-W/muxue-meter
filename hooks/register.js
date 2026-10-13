@@ -1247,19 +1247,22 @@ export function register(on) {
     const logMark = logWarns(e.surface) ? '⚠ ' + log : null
     // A transcript that starts at a compaction: the conversation before it is in another file.
     const cutMark = isLogCut() ? '✂ ' + tr('logCut') : null
-    const withLog = (p) => (log && !logMark ? [p[0], p[1], log, ...p.slice(2)] : p)
-    // Narrower and narrower: the transcript size, the model name, then the cache hit, go before
-    // the fills; the cryptic compact form is the last resort.
+    // Kept at every width but the last: how much of the conversation the app still shows hangs on
+    // it. Below LOG_WARN it sits in the line, after the session's value; the compact form has the
+    // size alone.
+    const inLine = log && !logMark ? log : null
+    const withLog = (p, text = inLine) => (text ? [p[0], p[1], text, ...p.slice(2)] : p)
+    const logShort = inLine ? fmtMB(logBytes) + 'MB' : null
+    // Narrower and narrower: the model name, then the cache hit, go before the fills; the cryptic
+    // compact form is the last resort.
     const variants = [
       [...withLog(full), ...fillReset],
       [...withLog(full), ...fillWide],
       [...withLog(mid), ...fillWide],
-      [...full, ...fillReset],
-      [...full, ...fillWide],
-      [...mid, ...fillWide],
-      [...mid.slice(0, 3), ...fillWide],
-      [...mid.slice(0, 3), ...fillShort],
-      [...compact, ...fillShort],
+      [...withLog(mid.slice(0, 3)), ...fillWide],
+      [...withLog(mid.slice(0, 3)), ...fillShort],
+      [...withLog(compact, logShort), ...fillShort],
+      withLog(compact, logShort),
       compact,
     ].map((p) => p.join(' · '))
     const badge =
