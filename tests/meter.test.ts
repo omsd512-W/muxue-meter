@@ -42,6 +42,8 @@ type World = {
   projectDirs?: string[]
   // Files listed in a folder (a transcript's subagents), by the folder's full path.
   lists?: Record<string, string[]>
+  // No awk or head on the host (Windows): a transcript is read through $.fs, 4 MiB at most.
+  noShell?: boolean
 }
 
 // Answers every noun the plugin calls beneath it. Files are matched by path suffix, so the
@@ -65,6 +67,8 @@ function world(on: On, w: World) {
     const files = filesNow()
     const hit = Object.keys(files).find((k) => e.path.replace(/\\/g, '/').endsWith(k))
     if (!hit) throw new Error('ENOENT: ' + e.path)
+    // As the engine's: a file over 4 MiB is not read.
+    if ((w.logs ?? {})[e.path] > 4 * 1048576) throw new Error('EFBIG: ' + e.path)
     return { value: files[hit] }
   })
   const logs = w.logs ?? {}
@@ -73,6 +77,24 @@ function world(on: On, w: World) {
   on('fs.stat', ($, e) => {
     if (!(e.path in logs)) throw new Error('ENOENT: ' + e.path)
     return { value: { kind: 'file', size: logs[e.path], mtimeMs: NOW, isLink: false } }
+  })
+  // awk and head, printing from `files` what the plugin's awk program and head print.
+  on('process.run', ($, e) => {
+    if (w.noShell) throw new Error('ENOENT: ' + e.argv[0])
+    const files = filesNow()
+    const ran = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (e.argv[0] === 'head') return ran((files[e.argv[3]] ?? '').slice(0, Number(e.argv[2])))
+    if (e.argv[0] !== 'awk') throw new Error('ENOENT: ' + e.argv[0])
+    const out = new Map<string, string>()
+    for (const path of e.argv.slice(2)) {
+      for (const line of (files[path] ?? '').split('\n')) {
+        if (!line.includes('"type":"assistant"') || !line.includes('"usage":{')) continue
+        const { id, model, usage: u } = JSON.parse(line).message
+        const counts = [u.input_tokens, u.output_tokens, u.cache_read_input_tokens, u.cache_creation_input_tokens].map((v) => v ?? 0)
+        out.set(id, [model, ...counts, u.speed === 'fast' ? 'fast' : '-'].join(' '))
+      }
+    }
+    return ran([...out.values()].join('\n') + '\n')
   })
   on('fs.list', ($, e) => ({
     value: e.path.endsWith('/.claude/projects')
@@ -1078,7 +1100,10 @@ test('transcript size: kept in the status line at every width, in the brief and 
   }
 })
 
-test('session value: every response in the transcript, subagents too, each once, then what is recorded here', async ($, on) => {
+// A session whose transcript holds $4.00 of responses: $2.20 + $0.80 (opus, one response written as
+// two rows, a placeholder with no tokens beside them) and $1.00 (a subagent's sonnet). Then a
+// response in the session itself, $0.01. `shows` checks the band and the footer on each surface.
+function sessionWorld(on: On, { size, noShell = false }: { size: number; noShell?: boolean }) {
   const use = (o: number, cr = 0) => ({ input_tokens: 0, output_tokens: o, cache_read_input_tokens: cr, cache_creation_input_tokens: 0 })
   const resp = (uuid: string, id: string, model: string, usage: object) => ({
     type: 'assistant',
@@ -1091,15 +1116,14 @@ test('session value: every response in the transcript, subagents too, each once,
   const clock = world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: { cfg: enCfg },
-    logs: { [LOG]: 3 * MB },
+    logs: { [LOG]: size },
+    noShell,
     files: {
       [LOG]: jsonl(
         meta,
         prompt,
-        // One response written as two rows, the last with its whole usage: $2.00 + $0.20 once.
         resp('r1', 'msg_1', 'claude-opus-5-5', use(10)),
         resp('r2', 'msg_1', 'claude-opus-5-5', use(100000, 1000000)),
-        // A placeholder the engine wrote: no tokens, no price, not counted.
         resp('r3', 'msg_2', '<synthetic>', use(0)),
         resp('r4', 'msg_3', 'claude-opus-5-5', use(40000)),
       ),
@@ -1114,7 +1138,7 @@ test('session value: every response in the transcript, subagents too, each once,
     yield { kind: 'stop', stopReason: 'end_turn', usage }
     return { turnId: e.turnId, index: e.index, answer: 'x', toolUses: [], stopReason: 'end_turn', usage }
   } as any)
-  const shows = async (usd: string) => {
+  const shows = async ($: any, usd: string) => {
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
       const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
@@ -1124,16 +1148,45 @@ test('session value: every response in the transcript, subagents too, each once,
       await foot.unmount()
     }
   }
+  const respond = async ($: any) => {
+    const stream: any = $.turn.step({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1 } as any)
+    for await (const _ of stream) {
+    }
+    await stream.result
+  }
+  return { clock, shows, respond }
+}
+
+test('session value: every response in the transcript, subagents too, each once, then what is recorded here', async ($, on) => {
+  const { clock, shows, respond } = sessionWorld(on, { size: 3 * MB })
   await start($, 'desktop')
   // Before the transcript is read, this session's own record: nothing yet.
-  await shows('$0.00')
+  await shows($, '$0.00')
   await clock.advance(1)
-  // $2.20 + $0.80 (opus) + $1.00 (the subagent's sonnet).
-  await shows('$4.00')
-  // A response in this session: $0.01 more.
-  const stream: any = $.turn.step({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1 } as any)
-  for await (const _ of stream) {
-  }
-  await stream.result
-  await shows('$4.01')
+  await shows($, '$4.00')
+  await respond($)
+  await shows($, '$4.01')
+})
+
+test('session value: a transcript over the 4 MiB $.fs reads is read through awk', async ($, on) => {
+  const { clock, shows } = sessionWorld(on, { size: 41.3 * MB })
+  await start($, 'desktop')
+  await clock.advance(1)
+  await shows($, '$4.00')
+})
+
+test('session value: with no awk, a transcript up to 4 MiB is read through $.fs', async ($, on) => {
+  const small = sessionWorld(on, { size: 3 * MB, noShell: true })
+  await start($, 'desktop')
+  await small.clock.advance(1)
+  await small.shows($, '$4.00')
+})
+
+test('session value: with no awk and a transcript over 4 MiB, the session\'s own record', async ($, on) => {
+  const { clock, shows, respond } = sessionWorld(on, { size: 41.3 * MB, noShell: true })
+  await start($, 'desktop')
+  await clock.advance(1)
+  await shows($, '$0.00')
+  await respond($)
+  await shows($, '$0.01')
 })

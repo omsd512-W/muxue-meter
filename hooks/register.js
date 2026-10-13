@@ -232,10 +232,10 @@ const LOG_LIMIT = 50 * 1048576
 const LOG_WARN = 40 * 1048576
 const LOG_SCAN_MS = 5 * 60000
 // The growth between two checks that means the file was rewritten (as when the earlier
-// conversation is put back in front of it), and the largest file read through (see scanLog).
+// conversation is put back in front of it), and how much of its start tells whether it was cut.
 const LOG_JUMP = 5 * 1048576
-const LOG_SCAN_MAX = 200 * 1048576
-// cut: whether the transcript starts at a compaction (see readLog); undefined until read, null
+const LOG_HEAD = 262144
+// cut: whether the transcript starts at a compaction (see startsCut); undefined until read, null
 // when that could not be told. scanned: read since it was found or rewritten.
 let logFile = { sid: null, path: null, scannedAt: 0, cut: undefined, scanned: false }
 let logBytes = null // size of this session's transcript, null until it is found
@@ -270,29 +270,68 @@ async function findLog($) {
 // that starts at that compaction: the conversation before it stays in the old file, and the app
 // shows the new one alone. Its first message is the compaction boundary; any other transcript,
 // a compacted one too, starts with a message of the conversation.
+function startsCut(text) {
+  for (const line of text.split('\n')) {
+    if (!line.includes('"uuid"')) continue
+    let row
+    try {
+      row = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (typeof row?.uuid !== 'string' || !['user', 'assistant', 'system', 'attachment'].includes(row.type)) continue
+    return row.type === 'system' && row.subtype === 'compact_boundary'
+  }
+  return null
+}
 // The session's value is the transcript's own: every response in it (a merged-back history and
 // what came before this plugin included), its subagents' too, then what is recorded here since.
 // A response is written as several rows, the last with its whole usage: counted once, by its id.
-function readLog(texts) {
-  let cut = null
+// Responses by id, [model, usage] each, from the files' text.
+function responsesIn(texts) {
   const byMsg = new Map()
-  texts.forEach((text, k) => {
+  for (const text of texts) {
     for (const line of text.split('\n')) {
-      const isFirst = k === 0 && cut === null && line.includes('"uuid"')
-      if (!isFirst && !(line.includes('"usage"') && line.includes('"assistant"'))) continue
+      if (!line.includes('"usage"') || !line.includes('"assistant"')) continue
       let row
       try {
         row = JSON.parse(line)
       } catch {
         continue
       }
-      if (isFirst && typeof row?.uuid === 'string' && ['user', 'assistant', 'system', 'attachment'].includes(row.type)) {
-        cut = row.type === 'system' && row.subtype === 'compact_boundary'
-      }
       const m = row?.message
-      if (row?.type === 'assistant' && m?.id && m.usage) byMsg.set(k + ':' + m.id, [m.model || '', m.usage])
+      if (row?.type === 'assistant' && m?.id && m.usage) byMsg.set(m.id, [m.model || '', m.usage])
     }
+  }
+  return byMsg
+}
+// The same through awk, for a file over the 4 MiB $.fs reads: one line per response, its model,
+// its four token counts and "fast" or "-". In a row the message's model and id come first, and
+// its usage is the last "usage" object, whose own counts precede those of its iterations.
+const LOG_AWK = [
+  '/"type":"assistant"/ && /"usage":\\{/ {',
+  '  if (!match($0, /"id":"msg_[^"]*"/)) next',
+  '  id = substr($0, RSTART + 6, RLENGTH - 7)',
+  '  m = match($0, /"model":"[^"]*"/) ? substr($0, RSTART + 9, RLENGTH - 10) : ""',
+  '  u = $0; last = ""',
+  '  while (match(u, /"usage":\\{/)) { last = substr(u, RSTART); u = substr(u, RSTART + 9) }',
+  '  out[id] = m " " n(last, "input_tokens") " " n(last, "output_tokens") " " n(last, "cache_read_input_tokens") " " n(last, "cache_creation_input_tokens") " " (last ~ /"speed":"fast"/ ? "fast" : "-")',
+  '}',
+  'END { for (k in out) print out[k] }',
+  'function n(s, k) { return match(s, "\\"" k "\\":[0-9]+") ? substr(s, RSTART + length(k) + 3, RLENGTH - length(k) - 3) : 0 }',
+].join('\n')
+function responsesByAwk(stdout) {
+  const byMsg = new Map()
+  stdout.split('\n').forEach((line, k) => {
+    const [model, i, o, cr, cw, speed] = line.split(' ')
+    if (speed === undefined) return
+    const usage = { input_tokens: +i, output_tokens: +o, cache_read_input_tokens: +cr, cache_creation_input_tokens: +cw }
+    if (speed === 'fast') usage.speed = 'fast'
+    byMsg.set(k, [model, usage])
   })
+  return byMsg
+}
+function totalsOf(byMsg) {
   const tot = emptyTotals()
   for (const [model, u] of byMsg.values()) {
     const r = { i: u.input_tokens || 0, o: u.output_tokens || 0, cr: u.cache_read_input_tokens || 0, cw: u.cache_creation_input_tokens || 0 }
@@ -304,24 +343,50 @@ function readLog(texts) {
     tot.n += 1
     tot.usd += rowUsd(key, r)
   }
-  return { cut, tot }
+  return tot
 }
+// awk and head where the host has them (macOS, Linux); else the files themselves, which $.fs reads
+// up to 4 MiB. A larger transcript with neither keeps this session's own record.
 async function scanLog($) {
   const path = logFile.path
   if (!path || logBytes === null) return
   logFile.scanned = true
-  if (logBytes > LOG_SCAN_MAX) return
   // Taken before the read: a response recorded while it runs counts here, not in the file.
   const snap = sessionTotals()
-  const texts = [await $.fs.read(path)]
+  const files = [path]
   try {
     const dir = path.slice(0, -'.jsonl'.length) + '/subagents'
-    for (const e of await $.fs.list(dir)) if (e.kind === 'file' && e.name.endsWith('.jsonl')) texts.push(await $.fs.read(dir + '/' + e.name))
+    for (const e of await $.fs.list(dir)) if (e.kind === 'file' && e.name.endsWith('.jsonl')) files.push(dir + '/' + e.name)
   } catch {}
-  const { cut, tot } = readLog(texts)
+  let cut = null
+  let tot = null
+  const why = []
+  try {
+    const run = await $.process.run(['awk', LOG_AWK, ...files], { timeoutMs: 60000 })
+    if (run.exitCode === 0 && !run.isStdoutTruncated) tot = totalsOf(responsesByAwk(run.stdout))
+    else why.push('awk exit ' + run.exitCode + (run.isStdoutTruncated ? ', output cut' : ''))
+    const head = await $.process.run(['head', '-c', String(LOG_HEAD), path], { timeoutMs: 10000 })
+    if (head.exitCode === 0) cut = startsCut(head.stdout)
+  } catch (err) {
+    why.push('awk/head: ' + (err?.message || err))
+  }
+  if (tot === null || cut === null) {
+    try {
+      const texts = []
+      for (const f of files) texts.push(await $.fs.read(f))
+      if (tot === null) tot = totalsOf(responsesIn(texts))
+      if (cut === null) cut = startsCut(texts[0])
+    } catch (err) {
+      why.push('read: ' + (err?.message || err))
+    }
+  }
+  // Kept off the screen: why the session's value stays this session's own record.
+  if (tot === null) $.ui.log($.plugin.name + ': transcript not read, the session value is this session\'s own record (' + why.join('; ') + ')', { to: 'debug' })
   logFile.cut = cut
-  logTotals = tot
-  logSnap = snap
+  if (tot) {
+    logTotals = tot
+    logSnap = snap
+  }
   $.ui.invalidate('ui.render')
 }
 // What the band shows of the transcript; it redraws only when this changes.
