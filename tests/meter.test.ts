@@ -1164,6 +1164,12 @@ test('session value: every response in the transcript, subagents too, each once,
   await shows($, '$0.00')
   await clock.advance(1)
   await shows($, '$4.00')
+  // The tokens so far after the value: 1,240,000 in the transcript, input and output.
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    expect(await ui.find({ type: 'Text', text: /Session \$4\.00 · 1\.24M tok · Transcript 3\.0(\/50)?MB · Today/ })).toBeDefined()
+    await ui.unmount()
+  }
   await respond($)
   await shows($, '$4.01')
 })
@@ -1189,4 +1195,21 @@ test('session value: with no awk and a transcript over 4 MiB, the session\'s own
   await shows($, '$0.00')
   await respond($)
   await shows($, '$0.01')
+})
+
+test('session tokens: kept while the labels are, given up before them when narrower still', async ($, on) => {
+  const { clock } = sessionWorld(on, { size: 3 * MB })
+  await start($, 'desktop')
+  await clock.advance(1)
+  for (const surface of SURFACES) {
+    for (const [cols, re] of [
+      // The terminal's size has no "/50" and keeps its label longer.
+      [70, /^⚡ — tok\/s · Session \$4\.00 · 1\.24M tok · (Transcript )?3\.0MB · Today \$0\.00$/],
+      [50, /^⚡— · Session \$4\.00 · (Transcript )?3\.0MB · Today \$0\.00$/],
+    ] as const) {
+      const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(cols) })
+      expect([surface, cols, (await ui.find({ type: 'Text', text: /^⚡/ }))?.text]).toEqual([surface, cols, expect.stringMatching(re)])
+      await ui.unmount()
+    }
+  }
 })

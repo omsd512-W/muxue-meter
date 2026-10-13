@@ -1368,18 +1368,24 @@ export function register(on) {
     const inLine = log && !logMark ? log : null
     const withLog = (p, text = inLine) => (text ? [p[0], p[1], text, ...p.slice(2)] : p)
     const logShort = inLine ? fmtMB(logBytes) + 'MB' : null
+    // The session's tokens so far, right after its value: input (cache read and write included)
+    // and output, from the same responses as the value.
+    const tokAll = s.i + s.cr + s.cw + s.o
+    const withTok = (p) => (tokAll > 0 ? [p[0], p[1], fmtTok(tokAll) + ' tok', ...p.slice(2)] : p)
+    const both = (p, text) => withTok(withLog(p, text))
     // The labelled line with the speed as short as in the compact form.
     const tight = [compact[0], ...mid.slice(1, 3)]
     // Narrower and narrower: the model name, the cache hit, the fills' labels, the size's label,
-    // then the speed's, go before the labels of the values; the cryptic compact form is the last
-    // resort.
+    // the speed's, then the session's tokens, go before the labels of the values; the cryptic
+    // compact form is the last resort.
     const variants = [
-      [...withLog(full), ...fillReset],
-      [...withLog(full), ...fillWide],
-      [...withLog(mid), ...fillWide],
-      [...withLog(mid.slice(0, 3)), ...fillWide],
-      [...withLog(mid.slice(0, 3)), ...fillShort],
-      [...withLog(mid.slice(0, 3), logShort), ...fillShort],
+      [...both(full), ...fillReset],
+      [...both(full), ...fillWide],
+      [...both(mid), ...fillWide],
+      [...both(mid.slice(0, 3)), ...fillWide],
+      [...both(mid.slice(0, 3)), ...fillShort],
+      [...both(mid.slice(0, 3), logShort), ...fillShort],
+      [...both(tight, logShort), ...fillShort],
       [...withLog(tight, logShort), ...fillShort],
       [...withLog(compact, logShort), ...fillShort],
       withLog(compact, logShort),
