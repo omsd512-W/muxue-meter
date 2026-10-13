@@ -1378,27 +1378,33 @@ export function register(on) {
     // Narrower and narrower: the model name, the cache hit, the fills' labels, the size's label,
     // the speed's, then the session's tokens, go before the labels of the values; the cryptic
     // compact form is the last resort.
+    // From LOG_WARN the size's mark sits beside the line; where room runs short it drops its label
+    // ("⚠ 41.3/50MB") before the line gives up the session's tokens.
+    const markShort = logMark ? '⚠ ' + fmtMB(logBytes) + '/' + LOG_LIMIT / 1048576 + 'MB' : null
+    const variant = (parts, isShort = false) => ({ text: parts.join(' · '), mark: isShort ? markShort : logMark })
     const variants = [
-      [...both(full), ...fillReset],
-      [...both(full), ...fillWide],
-      [...both(mid), ...fillWide],
-      [...both(mid.slice(0, 3)), ...fillWide],
-      [...both(mid.slice(0, 3)), ...fillShort],
-      [...both(mid.slice(0, 3), logShort), ...fillShort],
-      [...both(tight, logShort), ...fillShort],
-      [...withLog(tight, logShort), ...fillShort],
-      [...withLog(compact, logShort), ...fillShort],
-      withLog(compact, logShort),
-      compact,
-    ].map((p) => p.join(' · '))
+      variant([...both(full), ...fillReset]),
+      variant([...both(full), ...fillWide]),
+      variant([...both(mid), ...fillWide]),
+      variant([...both(mid.slice(0, 3)), ...fillWide]),
+      variant([...both(mid.slice(0, 3)), ...fillShort]),
+      variant([...both(mid.slice(0, 3), logShort), ...fillShort]),
+      variant([...both(mid.slice(0, 3), logShort), ...fillShort], true),
+      variant([...both(tight, logShort), ...fillShort], true),
+      variant([...withLog(tight, logShort), ...fillShort], true),
+      variant([...withLog(compact, logShort), ...fillShort], true),
+      variant(withLog(compact, logShort), true),
+      variant(compact, true),
+    ]
     const badge =
       (latest ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 + (expanded ? 0 : strWidth(tr('updShow')) + 2) : 0) +
-      (logMark ? strWidth(logMark) + 2 : 0) +
       (cutMark ? strWidth(cutMark) + 2 : 0)
     const langW = expanded ? strWidth(cfg.lang === 'auto' ? 'Auto · ' + LANG_NAMES[autoLang] : LANG_NAMES[cfg.lang] || '') + 8 : 0
     // The view switch is in the prompt footer (SessionMode), not here.
     const room = cols - badge - langW
-    const status = variants.find((v) => strWidth(v) <= room) || variants[variants.length - 1]
+    const fits = (v) => strWidth(v.text) + (v.mark ? strWidth(v.mark) + 2 : 0) <= room
+    const chosen = variants.find(fits) || variants[variants.length - 1]
+    const status = chosen.text
 
     const left = Box({
       key: 'usage-left',
@@ -1406,7 +1412,7 @@ export function register(on) {
       columnGap: 2,
       children: [
         Text({ dimColor: true, wrap: 'truncate-end', children: [status] }),
-        ...(logMark ? [Text({ color: logColor(), children: [logMark] })] : []),
+        ...(chosen.mark ? [Text({ color: logColor(), children: [chosen.mark] })] : []),
         ...(cutMark ? [Text({ color: 'yellow', children: [cutMark] })] : []),
         ...(latest ? [Text({ color: 'yellow', children: ['⬆ ' + tr('upd', { v: 'v' + latest })] })] : []),
         // Opens the card, where the update command is.

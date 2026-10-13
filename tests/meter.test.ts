@@ -1213,3 +1213,19 @@ test('session tokens: kept while the labels are, given up before them when narro
     }
   }
 })
+
+test('session tokens: past 40MB the size mark drops its label before the line gives the tokens up', async ($, on) => {
+  const { clock } = sessionWorld(on, { size: 41.3 * MB })
+  await start($, 'desktop')
+  await clock.advance(1)
+  for (const surface of SURFACES) {
+    for (const cols of [120, 62]) {
+      const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(cols) })
+      expect([surface, cols, (await ui.find({ type: 'Text', text: /^⚡/ }))?.text]).toEqual([surface, cols, expect.stringContaining('1.24M tok')])
+      // The mark is the desktop's: whole where there is room, without its label at 62 columns.
+      const mark = (await ui.find({ type: 'Text', text: /^⚠/ }))?.text
+      expect([surface, cols, mark]).toEqual([surface, cols, surface === 'terminal' ? undefined : cols === 120 ? '⚠ Transcript 41.3/50MB' : '⚠ 41.3/50MB'])
+      await ui.unmount()
+    }
+  }
+})
