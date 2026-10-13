@@ -102,7 +102,7 @@ const emptyDoc = () => ({ days: {}, b: {}, rl: {}, base: {}, est: {} })
 let doc = emptyDoc()
 let lastTurnAcct = null // account of the last recorded response: the rate-limit readings are its
 let others = {} // other sessions, as last read from the store
-let cfg = { view: 'brief', names: {}, hints: {}, exp: {}, range: '7', acct: 'all', exact: false, lang: 'auto' } // see normCfg
+let cfg = { view: 'brief', names: {}, hints: {}, exp: {}, range: '7', acct: 'all', exact: false } // see normCfg
 let curAcct = 'unknown'
 let acctReadAt = 0
 let lastFlush = 0
@@ -426,7 +426,7 @@ const isLogCut = () => logBytes !== null && logFile.cut === true
 
 // cfg is shared by every session. A change re-reads the stored copy and applies only itself,
 // so two sessions never undo each other's edits (a rename in one, a range change in another).
-const CFG_DEFAULTS = { view: 'brief', names: {}, hints: {}, exp: {}, range: '7', acct: 'all', exact: false, lang: 'auto' }
+const CFG_DEFAULTS = { view: 'brief', names: {}, hints: {}, exp: {}, range: '7', acct: 'all', exact: false }
 const normCfg = (c) => ({ ...CFG_DEFAULTS, ...(c || {}), names: { ...(c?.names || {}) }, hints: { ...(c?.hints || {}) }, exp: { ...(c?.exp || {}) } })
 async function updateCfg($, fn) {
   const stored = await $.store.get('cfg')
@@ -997,189 +997,28 @@ const strWidth = (s) => {
   for (const ch of s) w += /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(ch) ? 2 : 1
   return w
 }
-// ---- i18n -------------------------------------------------------------------------------
-// cfg.lang is 'auto' (follow the system language) or one of the codes below.
-// To add a language: add an entry here, a name in LANG_NAMES, and a case in detectLang.
-
-const LANG_NAMES = {
-  'zh-CN': '简体中文',
-  'zh-TW': '繁體中文',
-  en: 'English',
-  ja: '日本語',
-  ko: '한국어',
-  es: 'Español',
-  de: 'Deutsch',
-  fr: 'Français',
-  pt: 'Português',
-  ru: 'Русский',
-}
-const LANG_ORDER = Object.keys(LANG_NAMES)
+// ---- text -------------------------------------------------------------------------------
+// The interface is in Simplified Chinese only.
 
 const STR = {
-  en: {
-    session: 'Session', log: 'Transcript', logCut: 'Truncated', today: 'Today', hit: 'Cache hit', vHide: 'Hide', vBrief: 'Brief', vFull: 'Detailed',
-    d1: '1d', d7: '7d', d30: '30d', acct: 'Account', all: 'All', cur: 'current', acctN: 'Account {id}',
-    edit: 'Rename', rnPh: 'Type a name, press Enter', save: 'Save',
-    nodata: 'No data for the last {n} days yet. It starts counting after your next message.',
-    sum: 'Last {n} days · API-equivalent value {usd} · {req} requests',
-    total: 'Total', inAll: 'Input (all)', inp: 'Uncached input', out: 'Output (incl. thinking)', cr: 'Cache read', cw: 'Cache write', tps: 'TPS',
-    models: 'Share by model (by value)', nopr: 'no price', daily: 'Daily value',
-    tpsAvg: 'Average TPS by model',
-    exact: 'Exact', kmb: 'K/M/B', refresh: 'Refresh', cmd: 'Expand or collapse the usage window',
-    upd: "New version {v}", updHow: "Update: run this in a terminal, then /reload-plugins", updShow: "How to update",
-    quota: 'Quota estimate (API-equivalent value)', w5h: '5h', w7d: 'Week', qPred: 'Predicted {w} quota {q}', qNeed: '(after {n} more)', 
-    expL: 'Subscription ends', expNone: 'not set', expSet: 'Set date', expPh: 'YYYY-MM-DD, press Enter', expDone: 'expired',
-    qRaw: 'Uncached', qCr: 'Cache read', qCw: 'Cache write', qIn: 'Input', qOut: 'Output', qOld: 'Earlier use (not split by model)',
-    left: '{t} left', uD: 'd ', uH: 'h ', uM: 'm', qEmpty: 'No rate-limit reading yet (subscription accounts only); it appears after your next message.', tUsage: 'Overview', tQuota: 'Quota', tModels: 'Models', tDaily: 'Daily',
-  },
-  'zh-CN': {
-    session: '当前会话', log: '记录', logCut: '已截断', today: '今日', hit: '缓存命中', vHide: '收起', vBrief: '简略', vFull: '详细',
-    d1: '1天', d7: '7天', d30: '30天', acct: '账户', all: '全部', cur: '当前', acctN: '账户 {id}',
-    edit: '改名', rnPh: '输入名称后回车', save: '保存',
-    nodata: '最近 {n} 天还没有数据，发一条消息后开始统计',
-    sum: '最近 {n} 天 · API 等价价值 {usd} · {req} 次请求',
-    total: '总计', inAll: '实际输入', inp: '未缓存输入', out: '输出（含思考）', cr: '缓存读', cw: '缓存写', tps: 'TPS',
-    models: '各模型占比（按价值）', nopr: '无价格', daily: '每日价值',
-    tpsAvg: '各模型平均 TPS',
-    exact: '精确值', kmb: 'K/M/B', refresh: '刷新', cmd: '展开或收起用量小窗口',
-    upd: "新版本 {v}", updHow: "更新方法：在终端运行下面的命令，然后 /reload-plugins", updShow: "更新方法",
-    quota: '额度估算（API 等价价值）', w5h: '5小时', w7d: '每周', qPred: '预测{w}额度 {q}', qNeed: '（再用 {n} 后估算）', 
-    expL: '订阅到期', expNone: '未设置', expSet: '设置', expPh: '输入 YYYY-MM-DD 后回车', expDone: '已到期',
-    qRaw: '非缓存输入', qCr: '缓存读', qCw: '缓存写', qIn: '总输入', qOut: '输出', qOld: '更早的用量（未分模型）',
-    left: '剩{t}', uD: '天', uH: '小时', uM: '分钟', qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
-  },
-  'zh-TW': {
-    session: '目前工作階段', log: '記錄', logCut: '已截斷', today: '今日', hit: '快取命中', vHide: '收合', vBrief: '簡略', vFull: '詳細',
-    d1: '1天', d7: '7天', d30: '30天', acct: '帳號', all: '全部', cur: '目前', acctN: '帳號 {id}',
-    edit: '改名', rnPh: '輸入名稱後按 Enter', save: '儲存',
-    nodata: '最近 {n} 天還沒有資料，傳送一則訊息後開始統計',
-    sum: '最近 {n} 天 · API 等價價值 {usd} · {req} 次請求',
-    total: '總計', inAll: '實際輸入', inp: '未快取輸入', out: '輸出（含思考）', cr: '快取讀取', cw: '快取寫入', tps: 'TPS',
-    models: '各模型占比（依價值）', nopr: '無價格', daily: '每日價值',
-    tpsAvg: '各模型平均 TPS',
-    exact: '精確值', kmb: 'K/M/B', refresh: '重新整理', cmd: '展開或收合用量小視窗',
-    upd: "新版本 {v}", updHow: "更新方式：在終端機執行下面的指令，然後 /reload-plugins", updShow: "更新方式",
-    quota: '額度估算（API 等價價值）', w5h: '5小時', w7d: '每週', qPred: '預測{w}額度 {q}', qNeed: '（再用 {n} 後估算）', 
-    qEmpty: '還沒有限額讀數（僅訂閱帳號），傳送一則訊息後出現', tUsage: '概覽', tQuota: '額度', tModels: '模型', tDaily: '每日',
-  },
-  ja: {
-    session: 'セッション', log: '履歴', logCut: '切り詰め', today: '今日', hit: 'キャッシュ命中', vHide: '隠す', vBrief: '簡易', vFull: '詳細',
-    d1: '1日', d7: '7日', d30: '30日', acct: 'アカウント', all: 'すべて', cur: '現在', acctN: 'アカウント {id}',
-    edit: '名前変更', rnPh: '名前を入力して Enter', save: '保存',
-    nodata: '直近 {n} 日のデータはまだありません。次のメッセージから集計します。',
-    sum: '直近 {n} 日 · API 換算額 {usd} · {req} 回のリクエスト',
-    total: '合計', inAll: '実質入力', inp: '非キャッシュ入力', out: '出力（思考含む）', cr: 'キャッシュ読取', cw: 'キャッシュ書込', tps: 'TPS',
-    models: 'モデル別の割合（金額ベース）', nopr: '価格なし', daily: '日別の金額',
-    tpsAvg: 'モデル別の平均 TPS',
-    exact: '正確な値', kmb: 'K/M/B', refresh: '更新', cmd: '使用量ウィンドウを開閉',
-    upd: "新バージョン {v}", updHow: "更新方法：ターミナルで次のコマンドを実行し、/reload-plugins", updShow: "更新方法",
-    quota: '利用枠の推定（API 換算額）', w5h: '5時間', w7d: '週', qPred: '{w}の予測枠 {q}', qNeed: '（あと {n} で推定）', 
-    qEmpty: '上限の読み取りはまだありません（サブスクリプションのみ）。次のメッセージ後に表示されます。', tUsage: '概要', tQuota: '利用枠', tModels: 'モデル', tDaily: '日別',
-  },
-  ko: {
-    session: '현재 세션', log: '기록', logCut: '잘림', today: '오늘', hit: '캐시 적중', vHide: '숨기기', vBrief: '간략', vFull: '자세히',
-    d1: '1일', d7: '7일', d30: '30일', acct: '계정', all: '전체', cur: '현재', acctN: '계정 {id}',
-    edit: '이름 변경', rnPh: '이름 입력 후 Enter', save: '저장',
-    nodata: '최근 {n}일 데이터가 아직 없습니다. 다음 메시지부터 집계합니다.',
-    sum: '최근 {n}일 · API 환산 가치 {usd} · 요청 {req}회',
-    total: '합계', inAll: '실제 입력', inp: '비캐시 입력', out: '출력(사고 포함)', cr: '캐시 읽기', cw: '캐시 쓰기', tps: 'TPS',
-    models: '모델별 비중 (가치 기준)', nopr: '가격 없음', daily: '일별 가치',
-    tpsAvg: '모델별 평균 TPS',
-    exact: '정확한 값', kmb: 'K/M/B', refresh: '새로고침', cmd: '사용량 창 열기/닫기',
-    upd: "새 버전 {v}", updHow: "업데이트: 터미널에서 아래 명령을 실행한 뒤 /reload-plugins", updShow: "업데이트 방법",
-    quota: '한도 추정 (API 환산 가치)', w5h: '5시간', w7d: '주간', qPred: '{w} 예상 한도 {q}', qNeed: '({n} 더 사용 후 추정)', 
-    qEmpty: '아직 한도 정보가 없습니다(구독 계정만). 다음 메시지 후 표시됩니다.', tUsage: '개요', tQuota: '한도', tModels: '모델', tDaily: '일별',
-  },
-  es: {
-    session: 'Sesión', log: 'Historial', logCut: 'Truncado', today: 'Hoy', hit: 'Acierto de caché', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalles',
-    d1: '1 d', d7: '7 d', d30: '30 d', acct: 'Cuenta', all: 'Todas', cur: 'actual', acctN: 'Cuenta {id}',
-    edit: 'Renombrar', rnPh: 'Escribe un nombre y pulsa Enter', save: 'Guardar',
-    nodata: 'Aún no hay datos de los últimos {n} días. Empieza a contar con tu próximo mensaje.',
-    sum: 'Últimos {n} días · valor equivalente en API {usd} · {req} solicitudes',
-    total: 'Total', inAll: 'Entrada total', inp: 'Entrada sin caché', out: 'Salida (con razonamiento)', cr: 'Lectura de caché', cw: 'Escritura de caché', tps: 'TPS',
-    models: 'Reparto por modelo (por valor)', nopr: 'sin precio', daily: 'Valor diario',
-    tpsAvg: 'TPS medio por modelo',
-    exact: 'Exacto', kmb: 'K/M/B', refresh: 'Actualizar', cmd: 'Mostrar u ocultar la ventana de uso',
-    upd: "Nueva versión {v}", updHow: "Para actualizar: ejecuta esto en una terminal y luego /reload-plugins", updShow: "Cómo actualizar",
-    quota: 'Cuota estimada (valor equivalente en API)', w5h: '5 h', w7d: 'Semana', qPred: 'Cuota prevista ({w}) {q}', qNeed: '(tras {n} más)', 
-    qEmpty: 'Aún no hay lectura de límites (solo cuentas de suscripción); aparece tras tu próximo mensaje.', tUsage: 'Resumen', tQuota: 'Cuota', tModels: 'Modelos', tDaily: 'Diario',
-  },
-  de: {
-    session: 'Sitzung', log: 'Verlauf', logCut: 'Gekürzt', today: 'Heute', hit: 'Cache-Treffer', vHide: 'Ausblenden', vBrief: 'Kurz', vFull: 'Details',
-    d1: '1 T', d7: '7 T', d30: '30 T', acct: 'Konto', all: 'Alle', cur: 'aktuell', acctN: 'Konto {id}',
-    edit: 'Umbenennen', rnPh: 'Namen eingeben, Enter drücken', save: 'Speichern',
-    nodata: 'Noch keine Daten für die letzten {n} Tage. Die Zählung beginnt mit der nächsten Nachricht.',
-    sum: 'Letzte {n} Tage · API-Gegenwert {usd} · {req} Anfragen',
-    total: 'Gesamt', inAll: 'Eingabe gesamt', inp: 'Eingabe ohne Cache', out: 'Ausgabe (inkl. Denken)', cr: 'Cache gelesen', cw: 'Cache geschrieben', tps: 'TPS',
-    models: 'Anteil je Modell (nach Wert)', nopr: 'kein Preis', daily: 'Tageswert',
-    tpsAvg: 'Durchschnittliche TPS je Modell',
-    exact: 'Exakt', kmb: 'K/M/B', refresh: 'Aktualisieren', cmd: 'Nutzungsfenster ein- oder ausklappen',
-    upd: "Neue Version {v}", updHow: "Aktualisieren: dies in einem Terminal ausführen, dann /reload-plugins", updShow: "So aktualisieren",
-    quota: 'Kontingent geschätzt (API-Gegenwert)', w5h: '5 Std', w7d: 'Woche', qPred: 'Prognose {w}-Kontingent {q}', qNeed: '(nach weiteren {n})', 
-    qEmpty: 'Noch kein Limit-Wert (nur Abo-Konten); erscheint nach der nächsten Nachricht.', tUsage: 'Übersicht', tQuota: 'Kontingent', tModels: 'Modelle', tDaily: 'Täglich',
-  },
-  fr: {
-    session: 'Session', log: 'Historique', logCut: 'Tronqué', today: "Aujourd'hui", hit: 'Succès du cache', vHide: 'Masquer', vBrief: 'Bref', vFull: 'Détails',
-    d1: '1 j', d7: '7 j', d30: '30 j', acct: 'Compte', all: 'Tous', cur: 'actuel', acctN: 'Compte {id}',
-    edit: 'Renommer', rnPh: 'Saisissez un nom, puis Entrée', save: 'Enregistrer',
-    nodata: "Pas encore de données sur les {n} derniers jours. Le suivi commence au prochain message.",
-    sum: '{n} derniers jours · valeur équivalente API {usd} · {req} requêtes',
-    total: 'Total', inAll: 'Entrée totale', inp: 'Entrée hors cache', out: 'Sortie (réflexion incl.)', cr: 'Lecture du cache', cw: 'Écriture du cache', tps: 'TPS',
-    models: 'Répartition par modèle (en valeur)', nopr: 'sans prix', daily: 'Valeur par jour',
-    tpsAvg: 'TPS moyen par modèle',
-    exact: 'Exact', kmb: 'K/M/B', refresh: 'Actualiser', cmd: "Afficher ou masquer la fenêtre d'utilisation",
-    upd: "Nouvelle version {v}", updHow: "Mise à jour : lancez ceci dans un terminal, puis /reload-plugins", updShow: "Comment mettre à jour",
-    quota: 'Quota estimé (valeur équivalente API)', w5h: '5 h', w7d: 'Semaine', qPred: 'Quota prévu ({w}) {q}', qNeed: '(après {n} de plus)', 
-    qEmpty: 'Pas encore de relevé des limites (comptes abonnés seulement) ; il apparaît après le prochain message.', tUsage: 'Aperçu', tQuota: 'Quota', tModels: 'Modèles', tDaily: 'Par jour',
-  },
-  pt: {
-    session: 'Sessão', log: 'Histórico', logCut: 'Truncado', today: 'Hoje', hit: 'Acerto de cache', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalhes',
-    d1: '1 d', d7: '7 d', d30: '30 d', acct: 'Conta', all: 'Todas', cur: 'atual', acctN: 'Conta {id}',
-    edit: 'Renomear', rnPh: 'Digite um nome e pressione Enter', save: 'Salvar',
-    nodata: 'Ainda não há dados dos últimos {n} dias. A contagem começa na próxima mensagem.',
-    sum: 'Últimos {n} dias · valor equivalente na API {usd} · {req} solicitações',
-    total: 'Total', inAll: 'Entrada total', inp: 'Entrada sem cache', out: 'Saída (inclui raciocínio)', cr: 'Leitura de cache', cw: 'Gravação de cache', tps: 'TPS',
-    models: 'Participação por modelo (por valor)', nopr: 'sem preço', daily: 'Valor diário',
-    tpsAvg: 'TPS médio por modelo',
-    exact: 'Exato', kmb: 'K/M/B', refresh: 'Atualizar', cmd: 'Expandir ou recolher a janela de uso',
-    upd: "Nova versão {v}", updHow: "Para atualizar: execute isto num terminal e depois /reload-plugins", updShow: "Como atualizar",
-    quota: 'Cota estimada (valor equivalente na API)', w5h: '5 h', w7d: 'Semana', qPred: 'Cota prevista ({w}) {q}', qNeed: '(após mais {n})', 
-    qEmpty: 'Ainda não há leitura de limites (só contas de assinatura); aparece após a próxima mensagem.', tUsage: 'Resumo', tQuota: 'Cota', tModels: 'Modelos', tDaily: 'Diário',
-  },
-  ru: {
-    session: 'Сессия', log: 'История', logCut: 'Обрезан', today: 'Сегодня', hit: 'Попадания в кэш', vHide: 'Скрыть', vBrief: 'Кратко', vFull: 'Подробно',
-    d1: '1 д', d7: '7 д', d30: '30 д', acct: 'Аккаунт', all: 'Все', cur: 'текущий', acctN: 'Аккаунт {id}',
-    edit: 'Переименовать', rnPh: 'Введите имя и нажмите Enter', save: 'Сохранить',
-    nodata: 'Данных за последние {n} дн. пока нет. Подсчёт начнётся со следующего сообщения.',
-    sum: 'Последние {n} дн. · эквивалент по API {usd} · запросов: {req}',
-    total: 'Всего', inAll: 'Ввод всего', inp: 'Ввод без кэша', out: 'Вывод (с рассуждениями)', cr: 'Чтение кэша', cw: 'Запись кэша', tps: 'TPS',
-    models: 'Доля по моделям (по стоимости)', nopr: 'нет цены', daily: 'Стоимость по дням',
-    tpsAvg: 'Средний TPS по моделям',
-    exact: 'Точно', kmb: 'K/M/B', refresh: 'Обновить', cmd: 'Показать или скрыть окно использования',
-    upd: "Новая версия {v}", updHow: "Обновление: выполните это в терминале, затем /reload-plugins", updShow: "Как обновить",
-    quota: 'Оценка лимита (эквивалент по API)', w5h: '5 ч', w7d: 'Неделя', qPred: 'Прогноз лимита ({w}) {q}', qNeed: '(ещё {n})', 
-    qEmpty: 'Данных о лимитах пока нет (только для подписки); появятся после следующего сообщения.', tUsage: 'Обзор', tQuota: 'Лимит', tModels: 'Модели', tDaily: 'По дням',
-  },
+  session: '当前会话', log: '记录', logCut: '已截断', today: '今日', hit: '缓存命中', vHide: '收起', vBrief: '简略', vFull: '详细',
+  d1: '1天', d7: '7天', d30: '30天', acct: '账户', all: '全部', cur: '当前', acctN: '账户 {id}',
+  edit: '改名', rnPh: '输入名称后回车', save: '保存',
+  nodata: '最近 {n} 天还没有数据，发一条消息后开始统计',
+  sum: '最近 {n} 天 · API 等价价值 {usd} · {req} 次请求',
+  total: '总计', inAll: '实际输入', inp: '未缓存输入', out: '输出（含思考）', cr: '缓存读', cw: '缓存写', tps: 'TPS',
+  models: '各模型占比（按价值）', nopr: '无价格', daily: '每日价值',
+  tpsAvg: '各模型平均 TPS',
+  exact: '精确值', kmb: 'K/M/B', refresh: '刷新', cmd: '展开或收起用量小窗口',
+  upd: "新版本 {v}", updHow: "更新方法：在终端运行下面的命令，然后 /reload-plugins", updShow: "更新方法",
+  quota: '额度估算（API 等价价值）', w5h: '5小时', w7d: '每周', qPred: '预测{w}额度 {q}', qNeed: '（再用 {n} 后估算）', 
+  expL: '订阅到期', expNone: '未设置', expSet: '设置', expPh: '输入 YYYY-MM-DD 后回车', expDone: '已到期',
+  qRaw: '非缓存输入', qCr: '缓存读', qCw: '缓存写', qIn: '总输入', qOut: '输出', qOld: '更早的用量（未分模型）',
+  left: '剩{t}', uD: '天', uH: '小时', uM: '分钟', qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
 }
-
-let autoLang = 'en'
-const activeLang = () => (cfg.lang !== 'auto' && STR[cfg.lang] ? cfg.lang : autoLang)
 const tr = (key, vars) => {
-  const s = (STR[activeLang()] || STR.en)[key] ?? STR.en[key] ?? key
+  const s = STR[key] ?? key
   return vars ? s.replace(/\{(\w+)\}/g, (_, k) => (k in vars ? vars[k] : '')) : s
-}
-
-// System language: the JS runtime's locale first, then the usual environment variables.
-async function detectLang($) {
-  let loc = ''
-  try {
-    loc = Intl.DateTimeFormat().resolvedOptions().locale || ''
-  } catch {}
-  if (!loc) loc = (await $.env.get('LC_ALL')) || (await $.env.get('LANG')) || ''
-  loc = loc.toLowerCase().replace('_', '-')
-  if (loc.startsWith('zh')) return /tw|hk|mo|hant/.test(loc) ? 'zh-TW' : 'zh-CN'
-  const base = loc.slice(0, 2)
-  return STR[base] ? base : 'en'
 }
 
 // An account's name: the one given by renaming, else its masked e-mail, else "Account xxxx".
@@ -1219,7 +1058,6 @@ export function register(on) {
       const saved = await $.store.get('cfg')
       cfg = normCfg(saved && typeof saved === 'object' ? saved : null)
     })
-    await step(async () => (autoLang = await detectLang($)))
     await step(() => ensureSession($))
     await step(() => currentAccount($))
     await step(() => learnHints($))
@@ -1318,7 +1156,7 @@ export function register(on) {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const els = $.ui.resolve(e)
-    const { Box, Text, Button, Select, Code } = els
+    const { Box, Text, Button, Code } = els
     const cols = e.props.bodyColumns || e.viewport?.columns || 100
     const view = curView()
     if (view === 'hidden') return next(e)
@@ -1399,9 +1237,8 @@ export function register(on) {
     const badge =
       (latest ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 + (expanded ? 0 : strWidth(tr('updShow')) + 2) : 0) +
       (cutMark ? strWidth(cutMark) + 2 : 0)
-    const langW = expanded ? strWidth(cfg.lang === 'auto' ? 'Auto · ' + LANG_NAMES[autoLang] : LANG_NAMES[cfg.lang] || '') + 8 : 0
-    // The view switch is in the prompt footer (SessionMode), not here.
-    const room = cols - badge - langW
+    // The view switch is in the prompt footer (SessionMode).
+    const room = cols - badge
     const fits = (v) => strWidth(v.text) + (v.mark ? strWidth(v.mark) + 2 : 0) <= room
     const chosen = variants.find(fits) || variants[variants.length - 1]
     const status = chosen.text
@@ -1422,36 +1259,8 @@ export function register(on) {
       ],
     })
 
-    // At the right end of the top line: the language picker while the card is open.
-    const langOptions = [
-      { value: 'auto', label: 'Auto · ' + LANG_NAMES[autoLang] },
-      ...LANG_ORDER.map((code) => ({ value: code, label: LANG_NAMES[code] })),
-    ]
-    const right = Box({
-      key: 'usage-right',
-      flexDirection: 'row',
-      columnGap: 2,
-      children: [
-        ...(expanded
-          ? [
-              Select({
-                key: 'lang',
-                label: '🌐',
-                options: langOptions,
-                value: cfg.lang,
-                onSelect: (v) => updateCfg($, (c) => ({ ...c, lang: v })),
-              }),
-            ]
-          : []),
-      ],
-    })
-    const line = Box({
-      key: 'usage-line',
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      columnGap: 2,
-      children: [left, right],
-    })
+    // The top line is the same in the brief and the detailed view.
+    const line = Box({ key: 'usage-line', flexDirection: 'row', columnGap: 2, children: [left] })
 
     const children = [line]
     if (expanded && latest) {

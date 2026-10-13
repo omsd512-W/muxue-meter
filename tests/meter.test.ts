@@ -183,7 +183,7 @@ test('narrow band: the status line drops to its compact form', async ($, on) => 
 })
 
 test('view switch: one button in the footer, beside speed and value, cycles hidden, brief and full', async ($, on) => {
-  world(on, { env: { HOME: '/Users/mac' }, store: { cfg: { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'en' } } })
+  world(on, { env: { HOME: '/Users/mac' }, store: { cfg: { names: {}, hints: {}, range: '7', acct: 'all', exact: false } } })
   await start($, 'desktop')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
@@ -192,21 +192,21 @@ test('view switch: one button in the footer, beside speed and value, cycles hidd
     for (const key of ['view-hidden', 'view-brief', 'view-full']) expect(await ui.find({ key })).toBeUndefined()
     expect(await foot.find({ type: 'Text', text: /^⚡— · \$0\.00$/ })).toBeDefined()
     // Brief by default: the status line, no card.
-    expect(await foot.find({ key: 'view-cycle', text: '[Brief]' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
+    expect(await foot.find({ key: 'view-cycle', text: '[简略]' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /当前会话 \$/ })).toBeDefined()
     expect(await ui.find({ key: 'acct' })).toBeUndefined()
     // brief -> full: the card.
     await foot.press({ key: 'view-cycle' })
-    expect(await foot.find({ key: 'view-cycle', text: '[Detailed]' })).toBeDefined()
+    expect(await foot.find({ key: 'view-cycle', text: '[详细]' })).toBeDefined()
     expect(await ui.find({ key: 'acct' })).toBeDefined()
     // full -> hidden: nothing above the prompt, the footer stays.
     await foot.press({ key: 'view-cycle' })
-    expect(await foot.find({ key: 'view-cycle', text: '[Hide]' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeUndefined()
+    expect(await foot.find({ key: 'view-cycle', text: '[收起]' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /当前会话 \$/ })).toBeUndefined()
     expect(await foot.find({ type: 'Text', text: /^⚡— · \$0\.00$/ })).toBeDefined()
     // hidden -> brief.
     await foot.press({ key: 'view-cycle' })
-    expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /当前会话 \$/ })).toBeDefined()
     // /meter opens the card and goes back to the status line.
     await $.command.run({ command: 'meter', args: '' } as any)
     expect(await ui.find({ key: 'acct' })).toBeDefined()
@@ -222,7 +222,7 @@ test('a rename keeps names another session saved meanwhile', async ($, on) => {
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: { names: { [other]: 'work' }, hints: {}, range: '7', acct: 'all', exact: false, lang: 'en' },
+      cfg: { names: { [other]: 'work' }, hints: {}, range: '7', acct: 'all', exact: false },
       's:old': { upd: NOW, days: { [TODAY]: { [other]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } } },
     },
   })
@@ -245,7 +245,7 @@ const H = 3600000
 const BUCKET = 5 * 60000
 const bucket = (t: number) => String(Math.floor(t / BUCKET))
 const iso = (t: number) => new Date(t).toISOString()
-const enCfg = { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'en' }
+const baseCfg = { names: {}, hints: {}, range: '7', acct: 'all', exact: false }
 const measure = ($: any, rateLimits: unknown[]) =>
   $.session.measure({ context: { window: 200000 }, rateLimits, changed: ['rateLimits'] })
 
@@ -254,7 +254,7 @@ test('quota: value recorded since the first reading divided by the rise of the f
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       // Another session of the same account read both windows at 0% two hours ago; $10 came
       // after that, $99 before it (not part of the rise).
       's:old': {
@@ -279,13 +279,13 @@ test('quota: value recorded since the first reading divided by the rise of the f
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Predicted Week quota — \(after 3% more\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$50\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测每周额度 — （再用 3% 后估算）$/ })).toBeDefined()
     // Another tab: the quota rows give way, and the collapsed line still carries the fill.
     await ui.press({ key: 'tab-usage' })
-    expect(await ui.find({ type: 'Text', text: /Predicted/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /预测/ })).toBeUndefined()
     await $.command.run({ command: 'meter', args: '' } as any)
-    expect(await ui.find({ type: 'Text', text: /· 5h 20% .*· Week 2%/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /· 5小时 20% .*· 每周 2%/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
@@ -297,7 +297,7 @@ test('quota: recording that started mid-window divides only what came after the 
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       // Recording began an hour ago, inside a window already 88% full ($100 before the first
       // reading at 88%, $5 after it). Dividing $105 by 92% would give a tiny, wrong quota.
       's:old': {
@@ -315,7 +315,7 @@ test('quota: recording that started mid-window divides only what came after the 
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota — \(after 1% more\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 — （再用 1% 后估算）$/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -325,7 +325,7 @@ test('quota: recording that started mid-window divides only what came after the 
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$50\.00$/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -335,19 +335,19 @@ test('quota: an estimate saved by 0.5.0 drafts (a part divided by the whole fill
   const id = await hash('uuid-desktop')
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
-    store: { cfg: enCfg, 's:old': { upd: NOW, days: {}, est: { [id]: { seven_day: { q: 1.41, low: true, r: NOW + H, at: NOW - H } } } } },
+    store: { cfg: baseCfg, 's:old': { upd: NOW, days: {}, est: { [id]: { seven_day: { q: 1.41, low: true, r: NOW + H, at: NOW - H } } } } },
   })
   await start($, 'desktop')
   await measure($, [{ kind: 'seven_day', percentUsed: 92, resetsAt: iso(NOW + 6 * H) }])
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
   await $.command.run({ command: 'meter', args: '' } as any)
   await ui.press({ key: 'tab-quota' })
-  expect(await ui.find({ type: 'Text', text: /^Predicted Week quota — \(after 5% more\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^预测每周额度 — （再用 5% 后估算）$/ })).toBeDefined()
   await ui.unmount()
 })
 
-test('tabs are labelled in the chosen language; the toggle and language picker share the top line', async ($, on) => {
-  world(on, { env: { HOME: '/Users/mac' }, store: { cfg: { ...enCfg, lang: 'zh-CN' } } })
+test('tabs are labelled in Chinese, and there is no language picker', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac' }, store: { cfg: baseCfg } })
   await start($, 'desktop')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
@@ -355,11 +355,8 @@ test('tabs are labelled in the chosen language; the toggle and language picker s
     for (const [key, label] of [['tab-usage', '概览'], ['tab-quota', '额度'], ['tab-models', '模型'], ['tab-daily', '每日']]) {
       expect((await ui.find({ key }))?.props.label).toContain(label)
     }
-    const right = await ui.find({ key: 'usage-right' })
-    expect(right).toBeDefined()
-    expect(await ui.find({ key: 'lang' })).toBeDefined()
-    await $.command.run({ command: 'meter', args: '' } as any)
     expect(await ui.find({ key: 'lang' })).toBeUndefined()
+    await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
 })
@@ -370,7 +367,7 @@ test('quota: each account keeps its own readings; selecting one hides the others
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: { ...enCfg, names: { [other]: 'work' } },
+      cfg: { ...baseCfg, names: { [other]: 'work' } },
       's:old': {
         upd: NOW,
         days: { [TODAY]: { [other]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } },
@@ -387,8 +384,8 @@ test('quota: each account keeps its own readings; selecting one hides the others
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota — \(after 5% more\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$50\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 — （再用 5% 后估算）$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /· work · UTC\+8$/ })).toBeDefined()
     await ui.select({ key: 'acct', value: id })
     expect(await ui.find({ type: 'Text', text: /\$50\.00/ })).toBeUndefined()
@@ -403,7 +400,7 @@ test('quota: a resumed session keeps its own saved estimate', async ($, on) => {
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       's:session-1': { upd: NOW - 6 * H, days: {}, b: {}, est: { [id]: { five_hour: { q: 42, r: NOW - 5 * H, at: NOW - 6 * H, d: 1 } } } },
     },
   })
@@ -412,7 +409,7 @@ test('quota: a resumed session keeps its own saved estimate', async ($, on) => {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$42\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$42\.00$/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -424,7 +421,7 @@ test("quota: a new window starts over from its own first reading", async ($, on)
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       // The last window ended an hour ago (its baseline at 40%); the new one was first read at 0%
       // 30 minutes ago, in another session.
       's:old': {
@@ -444,7 +441,7 @@ test("quota: a new window starts over from its own first reading", async ($, on)
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
     // $6 in the new window over its 6%; the old window's $70 and its baseline play no part.
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$100$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$100$/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -455,7 +452,7 @@ test('quota: a window reset early (its fill fell, resetsAt kept) starts over fro
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       // The week was first read at 0% three days ago and filled to 96% ($300); a reset card then
       // emptied it without moving resetsAt, and another session read it at 0% two hours ago.
       's:before': {
@@ -480,7 +477,7 @@ test('quota: a window reset early (its fill fell, resetsAt kept) starts over fro
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
     // $25 since the reset over 10%; the $300 from before it is not divided by the new fill.
-    expect(await ui.find({ type: 'Text', text: /^Predicted Week quota \$250$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测每周额度 \$250$/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -490,7 +487,7 @@ test('quota: a session open across an early reset starts over from its first rea
   const id = await hash('uuid-desktop')
   const clock = world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
-    store: { cfg: enCfg, 's:other': { upd: NOW, days: {}, b: { [bucket(NOW - H)]: { [id]: { u: 200 } }, [bucket(NOW + H)]: { [id]: { u: 20 } } } } },
+    store: { cfg: baseCfg, 's:other': { upd: NOW, days: {}, b: { [bucket(NOW - H)]: { [id]: { u: 200 } }, [bucket(NOW + H)]: { [id]: { u: 20 } } } } },
   })
   await start($, 'desktop')
   await measure($, [{ kind: 'seven_day', percentUsed: 80, resetsAt: iso(NOW + 48 * H) }])
@@ -504,7 +501,7 @@ test('quota: a session open across an early reset starts over from its first rea
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
     // $20 since the 0% reading over 8%.
-    expect(await ui.find({ type: 'Text', text: /^Predicted Week quota \$250$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测每周额度 \$250$/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -516,7 +513,7 @@ test('quota: a late reading a little lower, or one later readings climb back abo
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       // Read at 0% first, 37% and 91% by other sessions; then two late readings, saved after the
       // 91% one: 84% (7 points lower, but 93% follows) and 89% (2 points lower).
       's:a': {
@@ -543,7 +540,7 @@ test('quota: a late reading a little lower, or one later readings climb back abo
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
     // $29.10 since the 0% reading over 97%; starting over from the 89% reading would give $10.
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$30\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$30\.00$/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -556,7 +553,7 @@ test('quota: a CLI session whose ~/.claude.json names another account is filed u
     env: { HOME: '/Users/mac' },
     files: { '/Users/mac/.claude.json': JSON.stringify({ oauthAccount: { accountUuid: 'uuid-cli', emailAddress: 'bob@example.org' } }) },
     store: {
-      cfg: { ...enCfg, names: { [named]: 'named', [real]: 'real' } },
+      cfg: { ...baseCfg, names: { [named]: 'named', [real]: 'real' } },
       // Desktop sessions (account from the env var) saw each account's own week.
       's:a': {
         upd: NOW,
@@ -590,10 +587,10 @@ test('quota: a CLI session whose ~/.claude.json names another account is filed u
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     await $.command.run({ command: 'meter', args: '' } as any)
     const acct = await ui.find({ key: 'acct' })
-    expect(acct?.props.options).toContainEqual({ value: real, label: 'real (current)' })
+    expect(acct?.props.options).toContainEqual({ value: real, label: 'real (当前)' })
     await ui.press({ key: 'tab-quota' })
     expect(await ui.find({ type: 'Text', text: /· real · UTC\+8$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$50\.00$/ })).toBeDefined()
     // The named account keeps only its own week, at 10%, with nothing to divide.
     await ui.select({ key: 'acct', value: named })
     expect(await ui.find({ type: 'Text', text: /\$50\.00/ })).toBeUndefined()
@@ -608,7 +605,7 @@ test('a session whose own saved doc is unreadable still counts the other session
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       's:session-1': 'not a doc',
       's:old': { upd: NOW, days: { [TODAY]: { [other]: { 'claude-sonnet-5-5': { i: 0, o: 1e6, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } } },
     },
@@ -616,12 +613,12 @@ test('a session whose own saved doc is unreadable still counts the other session
   await start($, 'desktop')
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
   await $.command.run({ command: 'meter', args: '' } as any)
-  expect(await ui.find({ type: 'Text', text: /API-equivalent value \$10\.00/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /API 等价价值 \$10\.00/ })).toBeDefined()
   await ui.unmount()
 })
 
 test('expanded at desktop width: the status line keeps labels instead of the compact form', async ($, on) => {
-  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: { ...enCfg, lang: 'zh-CN' } } })
+  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: baseCfg } })
   await start($, 'desktop')
   await measure($, [
     { kind: 'five_hour', percentUsed: 14, resetsAt: iso(NOW + 2 * H) },
@@ -637,7 +634,7 @@ test('expanded at desktop width: the status line keeps labels instead of the com
 })
 
 test('an impossible speed (a timing glitch) is neither shown nor recorded', async ($, on) => {
-  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: baseCfg } })
   const usage = { model: 'claude-opus-5-5', input_tokens: 10, output_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
   // 1000 tokens whose first chunk came 0.5 s before the stop: 2000 tok/s, more than any model streams.
   on('turn.step', async function* ($: any, e: any, next: any) {
@@ -653,7 +650,7 @@ test('an impossible speed (a timing glitch) is neither shown nor recorded', asyn
   }
   await stream.result
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
-  expect(await ui.find({ type: 'Text', text: /^⚡ — tok\/s · Session \$0\.0\d/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^⚡ — tok\/s · 当前会话 \$0\.0\d/ })).toBeDefined()
   await $.command.run({ command: 'meter', args: '' } as any)
   await ui.press({ key: 'tab-models' })
   expect(await ui.find({ type: 'Text', text: /t\/s$/ })).toBeUndefined()
@@ -661,7 +658,7 @@ test('an impossible speed (a timing glitch) is neither shown nor recorded', asyn
 })
 
 test("a subagent's requests count toward the session, and several at once keep their own timing", async ($, on) => {
-  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: baseCfg } })
   // Sonnet 5.5 output at $10 per million: 100k tokens = $1.00 per request.
   const usage = { model: 'claude-sonnet-5-5', input_tokens: 0, output_tokens: 100000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
   on('turn.step', async function* ($: any, e: any, next: any) {
@@ -683,12 +680,12 @@ test("a subagent's requests count toward the session, and several at once keep t
     run({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId: 'agent-2' }),
   ])
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
-  expect(await ui.find({ type: 'Text', text: /Session \$3\.00/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /当前会话 \$3\.00/ })).toBeDefined()
   await ui.unmount()
 })
 
 test('Haiku 5.5 is priced by prompt length, and Sonnet 5.5 cache reads at $0.10', async ($, on) => {
-  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: baseCfg } })
   const usages: Record<string, any> = {
     // 1M output at $0.50: a short prompt.
     a: { model: 'claude-haiku-5-5', input_tokens: 0, output_tokens: 1e6, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
@@ -714,7 +711,7 @@ test('Haiku 5.5 is priced by prompt length, and Sonnet 5.5 cache reads at $0.10'
   // 0.50 + (0.025 + 0.005 + 2.50) + 1.00
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    expect(await ui.find({ type: 'Text', text: /Session \$4\.03/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /当前会话 \$4\.03/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-models' })
     expect(await ui.find({ type: 'Text', text: /haiku-5-5@long/ })).toBeDefined()
@@ -728,7 +725,7 @@ test('Haiku 5.5 is priced by prompt length, and Sonnet 5.5 cache reads at $0.10'
 // NOW is 2026-10-02 11:00 in UTC+8, the time zone these are shown in.
 
 test('quota rows show when each window resets (UTC+8) and the time left', async ($, on) => {
-  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: baseCfg } })
   await start($, 'desktop')
   await measure($, [
     { kind: 'five_hour', percentUsed: 20, resetsAt: iso(NOW + 2 * H) },
@@ -737,12 +734,12 @@ test('quota rows show when each window resets (UTC+8) and the time left', async 
   for (const surface of SURFACES) {
     // Wide enough, the status line carries the reset times too.
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(200) })
-    expect(await ui.find({ type: 'Text', text: /5h 20% → 13:00 \(UTC\+8\) · Week 2% → 10-05 11:00 \(UTC\+8\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /5小时 20% → 13:00 \(UTC\+8\) · 每周 2% → 10-05 11:00 \(UTC\+8\)$/ })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.press({ key: 'tab-quota' })
     // Today's reset as HH:mm, a later day's with its date.
-    expect(await ui.find({ type: 'Text', text: '→ 13:00 · 2h 0m left' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '→ 10-05 11:00 · 3d 0h 0m left' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '→ 13:00 · 剩2小时0分钟' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '→ 10-05 11:00 · 剩3天0小时0分钟' })).toBeDefined()
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
   }
@@ -750,25 +747,25 @@ test('quota rows show when each window resets (UTC+8) and the time left', async 
 
 test('subscription end: typed in the quota title, shown with the time left, cleared when emptied', async ($, on) => {
   const id = await hash('uuid-desktop')
-  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: baseCfg } })
   await start($, 'desktop')
   await measure($, [{ kind: 'five_hour', percentUsed: 20, resetsAt: iso(NOW + 2 * H) }])
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
   await $.command.run({ command: 'meter', args: '' } as any)
   await ui.press({ key: 'tab-quota' })
-  expect(await ui.find({ type: 'Text', text: /Subscription ends/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /订阅到期/ })).toBeUndefined()
   // The date lasts to the end of that day in UTC+8: 2026-10-12 24:00 is 10 days 13 hours away.
   await ui.press({ key: 'exp-edit-' + id })
   await ui.input({ key: 'exp-' + id, text: '2026-10-12' })
-  expect(await ui.find({ type: 'Text', text: /· Subscription ends 2026-10-12 10d 13h 0m left · UTC\+8$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /· 订阅到期 2026-10-12 剩10天13小时0分钟 · UTC\+8$/ })).toBeDefined()
   // Something that is no date is not saved.
   await ui.press({ key: 'exp-edit-' + id })
   await ui.input({ key: 'exp-' + id, text: 'soon' })
-  expect(await ui.find({ type: 'Text', text: /Subscription ends 2026-10-12/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /订阅到期 2026-10-12/ })).toBeDefined()
   // An empty field clears it.
   await ui.press({ key: 'exp-edit-' + id })
   await ui.input({ key: 'exp-' + id, text: '' })
-  expect(await ui.find({ type: 'Text', text: /Subscription ends/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /订阅到期/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -777,7 +774,7 @@ test('quota: from an empty window (0%) the bucket of the first reading counts to
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       // The window was empty at the first reading; the $10 beside it came after (the reading
       // lags the response), so all of it is part of the rise.
       's:old': {
@@ -793,7 +790,7 @@ test('quota: from an empty window (0%) the bucket of the first reading counts to
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
   await $.command.run({ command: 'meter', args: '' } as any)
   await ui.press({ key: 'tab-quota' })
-  expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$50\.00$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -802,7 +799,7 @@ test('quota: from a window already in use, the bucket of the first reading is st
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       's:old': {
         upd: NOW,
         days: {},
@@ -817,18 +814,18 @@ test('quota: from a window already in use, the bucket of the first reading is st
   await $.command.run({ command: 'meter', args: '' } as any)
   await ui.press({ key: 'tab-quota' })
   // $10 after the first reading over 20 points.
-  expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^预测5小时额度 \$50\.00$/ })).toBeDefined()
   await ui.unmount()
 })
 
 test('the view is shared: another session switching it shows here within seconds', async ($, on) => {
-  const shared = new Map<string, unknown>([['cfg', enCfg]])
+  const shared = new Map<string, unknown>([['cfg', baseCfg]])
   const clock = world(on, { env: { HOME: '/Users/mac' }, liveStore: shared })
   await start($, 'desktop')
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
   expect(await ui.find({ key: 'acct' })).toBeUndefined()
   // Another session opens the card: it writes the shared settings.
-  shared.set('cfg', { ...enCfg, view: 'full' })
+  shared.set('cfg', { ...baseCfg, view: 'full' })
   await clock.advance(3000)
   expect(await ui.find({ key: 'acct' })).toBeDefined()
   await ui.unmount()
@@ -839,7 +836,7 @@ test('quota: each live window lists its use by model, earlier unsplit use on a l
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: enCfg,
+      cfg: baseCfg,
       's:old': {
         upd: NOW,
         days: {},
@@ -871,34 +868,34 @@ test('quota: each live window lists its use by model, earlier unsplit use on a l
     await ui.press({ key: 'tab-quota' })
     // Folded at first: only the windows' rows, each with its toggle.
     expect(await ui.find({ type: 'Text', text: /^opus-5-5$/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: 'Total' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '总计' })).toBeUndefined()
     await ui.press({ key: `q-open-${id}-five_hour` })
     await ui.press({ key: `q-open-${id}-seven_day` })
     // Both windows list the two models, the larger value first.
     const names = (await ui.findAll({ type: 'Text', text: /^opus-5-5$|^sonnet-5-5$/ })).map((x) => x.text)
     expect(names).toEqual(['opus-5-5', 'sonnet-5-5', 'opus-5-5', 'sonnet-5-5'])
     // opus: 1.0K uncached and 2.00M cache read, 2.00M input in all.
-    expect(await ui.find({ type: 'Text', text: 'Uncached 1.0K' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Cache read 2.00M' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '非缓存输入 1.0K' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '缓存读 2.00M' })).toBeDefined()
     // sonnet: 30.0K written to the cache, its whole input.
-    expect(await ui.find({ type: 'Text', text: 'Cache write 30.0K' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Input 30.0K' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '缓存写 30.0K' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '总输入 30.0K' })).toBeDefined()
     // The total adds the three parts: 1.0K + 2.00M + 30.0K.
-    expect(await ui.find({ type: 'Text', text: 'Input 2.03M' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Input 2.00M' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Output 200.0K' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '总输入 2.03M' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '总输入 2.00M' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '输出 200.0K' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '$5.00' })).toBeDefined()
     // The unsplit $30 falls inside the week alone.
-    expect(await ui.findAll({ type: 'Text', text: 'Earlier use (not split by model)' })).toHaveLength(1)
+    expect(await ui.findAll({ type: 'Text', text: '更早的用量（未分模型）' })).toHaveLength(1)
     expect(await ui.find({ type: 'Text', text: '$30.00' })).toBeDefined()
     // Each window ends with its total: the 5h $7, the week $7 and the earlier $30.
-    expect((await ui.findAll({ type: 'Text', text: 'Total' })).length).toBe(2)
-    expect(await ui.find({ type: 'Text', text: 'Output 300.0K' })).toBeDefined()
+    expect((await ui.findAll({ type: 'Text', text: '总计' })).length).toBe(2)
+    expect(await ui.find({ type: 'Text', text: '输出 300.0K' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '$7.00' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '$37.00' })).toBeDefined()
     // Folding one window again takes its rows away and leaves the other's.
     await ui.press({ key: `q-open-${id}-five_hour` })
-    expect((await ui.findAll({ type: 'Text', text: 'Total' })).length).toBe(1)
+    expect((await ui.findAll({ type: 'Text', text: '总计' })).length).toBe(1)
     await ui.press({ key: `q-open-${id}-seven_day` })
     await $.command.run({ command: 'meter', args: '' } as any)
     await ui.unmount()
@@ -906,7 +903,7 @@ test('quota: each live window lists its use by model, earlier unsplit use on a l
 })
 
 test('a response is recorded in its bucket by model as well', async ($, on) => {
-  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: baseCfg } })
   const usage = { input_tokens: 10, output_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
   on('turn.step', async function* ($: any, e: any, next: any) {
     yield { kind: 'text', index: 0, text: 'x' }
@@ -926,7 +923,7 @@ test('a response is recorded in its bucket by model as well', async ($, on) => {
   const id = await hash('uuid-desktop')
   await ui.press({ key: `q-open-${id}-five_hour` })
   expect(await ui.find({ type: 'Text', text: /^sonnet-5-5$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /Earlier use/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /更早的用量/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -936,7 +933,7 @@ test('subscription end: the field opens under its own account, not at the foot o
   world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
     store: {
-      cfg: { ...enCfg, names: { [id]: 'home', [other]: 'work' } },
+      cfg: { ...baseCfg, names: { [id]: 'home', [other]: 'work' } },
       's:old': { upd: NOW, days: {}, rl: { [other]: { five_hour: { p: 40, r: NOW + 3 * H, at: NOW - H } } } },
     },
   })
@@ -951,10 +948,10 @@ test('subscription end: the field opens under its own account, not at the foot o
   const at = (needle: string) => drawn.indexOf(needle)
   expect(at('"exp-' + id + '"')).toBeGreaterThan(at('"qt-' + id + '"'))
   // Before this account's own rows, and so before the other account's title.
-  expect(at('"exp-' + id + '"')).toBeLessThan(at('Predicted 5h quota'))
+  expect(at('"exp-' + id + '"')).toBeLessThan(at('预测5小时额度'))
   expect(at('"exp-' + id + '"')).toBeLessThan(at('"qt-' + other + '"'))
   await ui.input({ key: 'exp-' + id, text: '2026-10-12' })
-  expect(await ui.find({ type: 'Text', text: /· home · Subscription ends 2026-10-12/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /· home · 订阅到期 2026-10-12/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /· work · UTC\+8$/ })).toBeDefined()
   await ui.unmount()
 })
@@ -970,8 +967,8 @@ test('transcript size: after the session value, out of 50MB on the desktop, mark
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
     // The 50MB limit is the desktop app's: the terminal shows the size alone.
-    const shown = surface === 'desktop' ? 'Transcript 18.0/50MB' : 'Transcript 18.0MB'
-    expect(await ui.find({ type: 'Text', text: new RegExp('Session \\$0\\.00 · ' + shown.replace('.', '\\.') + ' · Today') })).toBeDefined()
+    const shown = surface === 'desktop' ? '记录 18.0/50MB' : '记录 18.0MB'
+    expect(await ui.find({ type: 'Text', text: new RegExp('当前会话 \\$0\\.00 · ' + shown.replace('.', '\\.') + ' · 今日') })).toBeDefined()
     expect(await foot.find({ type: 'Text', text: '18.0MB' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /⚠/ })).toBeUndefined()
     await ui.unmount()
@@ -987,10 +984,10 @@ test('transcript size: after the session value, out of 50MB on the desktop, mark
       const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
       const size = mb.toFixed(1)
       if (surface === 'desktop') {
-        expect((await ui.find({ type: 'Text', text: `⚠ Transcript ${size}/50MB` }))?.props.color).toBe(color)
+        expect((await ui.find({ type: 'Text', text: `⚠ 记录 ${size}/50MB` }))?.props.color).toBe(color)
         expect((await foot.find({ type: 'Text', text: `${size}MB` }))?.props.color).toBe(color)
       } else {
-        expect(await ui.find({ type: 'Text', text: new RegExp(`Transcript ${size.replace('.', '\\.')}MB`) })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: new RegExp(`记录 ${size.replace('.', '\\.')}MB`) })).toBeDefined()
         expect(await ui.find({ type: 'Text', text: /⚠/ })).toBeUndefined()
         expect((await foot.find({ type: 'Text', text: `${size}MB` }))?.props.dimColor).toBe(true)
       }
@@ -1008,7 +1005,7 @@ test('transcript size: found in another project folder when the root does not na
   })
   await start($, 'desktop')
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
-  expect(await ui.find({ type: 'Text', text: /Transcript 3\.3\/50MB/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /记录 3\.3\/50MB/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1017,7 +1014,7 @@ test('transcript size: nothing shown before the transcript is written', async ($
   await start($, 'desktop')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    expect(await ui.find({ type: 'Text', text: /Transcript/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /记录/ })).toBeUndefined()
     await ui.unmount()
   }
 })
@@ -1034,7 +1031,7 @@ async function expectCut($: any, isCut: boolean, size: string) {
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
-    const mark = await ui.find({ type: 'Text', text: '✂ Truncated' })
+    const mark = await ui.find({ type: 'Text', text: '✂ 已截断' })
     if (isCut) expect(mark?.props.color).toBe('yellow')
     else expect(mark).toBeUndefined()
     expect(await foot.find({ type: 'Text', text: size + (isCut ? ' ✂' : '') })).toBeDefined()
@@ -1078,7 +1075,7 @@ test('transcript cut: the mark goes once the earlier conversation is put back in
 })
 
 test('transcript size: kept in the status line at every width, in the brief and the detailed view', async ($, on) => {
-  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg }, logs: { [LOG]: 18 * MB } })
+  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: baseCfg }, logs: { [LOG]: 18 * MB } })
   await start($, 'desktop')
   await measure($, [
     { kind: 'five_hour', percentUsed: 17, resetsAt: iso(NOW + 2 * H) },
@@ -1090,9 +1087,9 @@ test('transcript size: kept in the status line at every width, in the brief and 
       for (const view of ['brief', 'detailed']) {
         if (view === 'detailed') await $.command.run({ command: 'meter', args: '' } as any)
         const line = await ui.find({ type: 'Text', text: /^⚡/ })
-        expect([surface, cols, view, line?.text]).toEqual([surface, cols, view, expect.stringMatching(/ · (Transcript )?18\.0(\/50)?MB( · |$)/)])
+        expect([surface, cols, view, line?.text]).toEqual([surface, cols, view, expect.stringMatching(/ · (记录 )?18\.0(\/50)?MB( · |$)/)])
         // The labels stay longer than the size's own: at 70 columns the line still has them.
-        if (cols === 70 && view === 'brief') expect(line?.text).toMatch(/^⚡ — tok\/s · Session \$0\.00 · (Transcript )?18\.0MB · Today \$0\.00 · 17%\/73%$/)
+        if (cols === 70 && view === 'brief') expect(line?.text).toMatch(/^⚡ — tok\/s · 当前会话 \$0\.00 · (记录 )?18\.0(\/50)?MB · 今日 \$0\.00 · 17%\/73%$/)
       }
       await $.command.run({ command: 'meter', args: '' } as any)
       await ui.unmount()
@@ -1115,7 +1112,7 @@ function sessionWorld(on: On, { size, noShell = false }: { size: number; noShell
   const agents = '/Users/mac/.claude/projects/-work/session-1/subagents'
   const clock = world(on, {
     env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
-    store: { cfg: enCfg },
+    store: { cfg: baseCfg },
     logs: { [LOG]: size },
     noShell,
     files: {
@@ -1142,7 +1139,7 @@ function sessionWorld(on: On, { size, noShell = false }: { size: number; noShell
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
       const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
-      expect(await ui.find({ type: 'Text', text: new RegExp('Session \\' + usd + ' ') })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: new RegExp('当前会话 \\' + usd + ' ') })).toBeDefined()
       expect(await foot.find({ type: 'Text', text: new RegExp(' · \\' + usd + '$') })).toBeDefined()
       await ui.unmount()
       await foot.unmount()
@@ -1167,7 +1164,7 @@ test('session value: every response in the transcript, subagents too, each once,
   // The tokens so far after the value: 1,240,000 in the transcript, input and output.
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    expect(await ui.find({ type: 'Text', text: /Session \$4\.00 · 1\.24M tok · Transcript 3\.0(\/50)?MB · Today/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /当前会话 \$4\.00 · 1\.24M tok · 记录 3\.0(\/50)?MB · 今日/ })).toBeDefined()
     await ui.unmount()
   }
   await respond($)
@@ -1204,8 +1201,8 @@ test('session tokens: kept while the labels are, given up before them when narro
   for (const surface of SURFACES) {
     for (const [cols, re] of [
       // The terminal's size has no "/50" and keeps its label longer.
-      [70, /^⚡ — tok\/s · Session \$4\.00 · 1\.24M tok · (Transcript )?3\.0MB · Today \$0\.00$/],
-      [50, /^⚡— · Session \$4\.00 · (Transcript )?3\.0MB · Today \$0\.00$/],
+      [70, /^⚡ — tok\/s · 当前会话 \$4\.00 · 1\.24M tok · (记录 )?3\.0(\/50)?MB · 今日 \$0\.00$/],
+      [50, /^⚡— · 当前会话 \$4\.00 · (记录 )?3\.0(\/50)?MB · 今日 \$0\.00$/],
     ] as const) {
       const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(cols) })
       expect([surface, cols, (await ui.find({ type: 'Text', text: /^⚡/ }))?.text]).toEqual([surface, cols, expect.stringMatching(re)])
@@ -1224,7 +1221,25 @@ test('session tokens: past 40MB the size mark drops its label before the line gi
       expect([surface, cols, (await ui.find({ type: 'Text', text: /^⚡/ }))?.text]).toEqual([surface, cols, expect.stringContaining('1.24M tok')])
       // The mark is the desktop's: whole where there is room, without its label at 62 columns.
       const mark = (await ui.find({ type: 'Text', text: /^⚠/ }))?.text
-      expect([surface, cols, mark]).toEqual([surface, cols, surface === 'terminal' ? undefined : cols === 120 ? '⚠ Transcript 41.3/50MB' : '⚠ 41.3/50MB'])
+      expect([surface, cols, mark]).toEqual([surface, cols, surface === 'terminal' ? undefined : cols === 120 ? '⚠ 记录 41.3/50MB' : '⚠ 41.3/50MB'])
+      await ui.unmount()
+    }
+  }
+})
+
+test('the detailed view keeps the brief view\'s top line', async ($, on) => {
+  const { clock } = sessionWorld(on, { size: 41.3 * MB })
+  await start($, 'desktop')
+  await clock.advance(1)
+  for (const surface of SURFACES) {
+    for (const cols of [120, 90, 70]) {
+      const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(cols) })
+      const top = async () => [(await ui.find({ type: 'Text', text: /^⚡/ }))?.text, (await ui.find({ type: 'Text', text: /^⚠/ }))?.text]
+      const brief = await top()
+      await $.command.run({ command: 'meter', args: '' } as any)
+      expect([surface, cols, ...(await top())]).toEqual([surface, cols, ...brief])
+      expect(brief[0]).toContain('1.24M tok')
+      await $.command.run({ command: 'meter', args: '' } as any)
       await ui.unmount()
     }
   }
