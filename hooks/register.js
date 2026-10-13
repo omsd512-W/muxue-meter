@@ -102,7 +102,7 @@ const emptyDoc = () => ({ days: {}, b: {}, rl: {}, base: {}, est: {} })
 let doc = emptyDoc()
 let lastTurnAcct = null // account of the last recorded response: the rate-limit readings are its
 let others = {} // other sessions, as last read from the store
-let cfg = { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'auto' } // see normCfg
+let cfg = { view: 'brief', names: {}, hints: {}, exp: {}, range: '7', acct: 'all', exact: false, lang: 'auto' } // see normCfg
 let curAcct = 'unknown'
 let acctReadAt = 0
 let lastFlush = 0
@@ -111,8 +111,8 @@ let lastFullRefresh = 0
 
 // UI state lives in $.state so a hot reload keeps it (module variables start over).
 // Declared in types/index.d.ts. A read while drawing subscribes the drawing to the value.
-const S_VIEW = { plugin: 'muxue-meter', key: 'view' }
 const S_EDITING = { plugin: 'muxue-meter', key: 'editingName' }
+const S_EXPING = { plugin: 'muxue-meter', key: 'editingExp' }
 const S_TPS = { plugin: 'muxue-meter', key: 'tps' }
 const S_TAB = { plugin: 'muxue-meter', key: 'tab' }
 
@@ -226,14 +226,20 @@ function scheduleFlush($) {
 
 // cfg is shared by every session. A change re-reads the stored copy and applies only itself,
 // so two sessions never undo each other's edits (a rename in one, a range change in another).
-const CFG_DEFAULTS = { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'auto' }
-const normCfg = (c) => ({ ...CFG_DEFAULTS, ...(c || {}), names: { ...(c?.names || {}) }, hints: { ...(c?.hints || {}) } })
+const CFG_DEFAULTS = { view: 'brief', names: {}, hints: {}, exp: {}, range: '7', acct: 'all', exact: false, lang: 'auto' }
+const normCfg = (c) => ({ ...CFG_DEFAULTS, ...(c || {}), names: { ...(c?.names || {}) }, hints: { ...(c?.hints || {}) }, exp: { ...(c?.exp || {}) } })
 async function updateCfg($, fn) {
   const stored = await $.store.get('cfg')
   cfg = normCfg(fn(normCfg(stored && typeof stored === 'object' ? stored : cfg)))
   $.ui.invalidate('ui.render')
-  await $.store.set('cfg', cfg)
+  cfgWriting++
+  try {
+    await $.store.set('cfg', cfg)
+  } finally {
+    cfgWriting--
+  }
 }
+let cfgWriting = 0 // while a change is being stored, syncCfg must not read the older stored copy
 
 // Other sessions' docs. A quick pass re-reads only new sessions and those active in the last
 // ACTIVE_MS (an idle session's doc does not change); a full pass every FULL_MS, or on the
@@ -263,6 +269,16 @@ async function refreshOthers($, full = false) {
   }
   others = next
   dataVersion++
+  $.ui.invalidate('ui.render')
+}
+
+async function syncCfg($) {
+  if (cfgWriting) return
+  const saved = await $.store.get('cfg')
+  if (!saved || typeof saved !== 'object') return
+  const next = normCfg(saved)
+  if (JSON.stringify(next) === JSON.stringify(cfg)) return
+  cfg = next
   $.ui.invalidate('ui.render')
 }
 
@@ -350,13 +366,19 @@ async function record($, model, usage, gen) {
   if (acct !== 'unknown') {
     const bucket = (doc.b[Math.floor((await $.clock.now()) / BUCKET_MS)] ||= {})
     const cell = (bucket[acct] ||= { u: 0 })
-    cell.u += rowUsd(model, {
+    const add = {
       i: usage.input_tokens || 0,
       o: usage.output_tokens || 0,
       cr: usage.cache_read_input_tokens || 0,
       cw: usage.cache_creation_input_tokens || 0,
-    })
+    }
+    const usd = rowUsd(model, add)
+    cell.u += usd
     if (!priceOf(model)) cell.x = 1
+    // Per model too, so a rate-limit window can be split by model (older buckets have u alone).
+    const mr = ((cell.m ||= {})[model] ||= { i: 0, o: 0, cr: 0, cw: 0, u: 0 })
+    for (const k of ['i', 'o', 'cr', 'cw']) mr[k] += add[k]
+    mr.u += usd
     lastTurnAcct = acct
   }
   const out = usage.output_tokens || 0
@@ -506,7 +528,17 @@ function refiled(s, fix) {
     }
     return out
   }
-  const sumCell = (x, y) => ({ u: (x.u || 0) + (y.u || 0), ...(x.x || y.x ? { x: 1 } : {}) })
+  const sumCell = (x, y) => {
+    const out = { u: (x.u || 0) + (y.u || 0), ...(x.x || y.x ? { x: 1 } : {}) }
+    if (x.m || y.m) {
+      out.m = { ...(x.m || {}) }
+      for (const [k, r] of Object.entries(y.m || {})) {
+        const t = out.m[k] || { i: 0, o: 0, cr: 0, cw: 0, u: 0 }
+        out.m[k] = Object.fromEntries(Object.keys(t).map((f) => [f, (t[f] || 0) + (r[f] || 0)]))
+      }
+    }
+    return out
+  }
   const newest = (x, y) => {
     const out = { ...x }
     for (const [k, v] of Object.entries(y)) if (!out[k] || (v?.at || 0) > (out[k].at || 0)) out[k] = v
@@ -557,6 +589,30 @@ function windowUsd(acct, start, end) {
   }
   return { usd, unpriced }
 }
+// What an account recorded in buckets overlapping [start, end], by model, most value first; old
+// is the value of buckets recorded before buckets were split by model.
+function windowModels(acct, start, end) {
+  const by = {}
+  let old = 0
+  const lo = Math.floor(start / BUCKET_MS)
+  const hi = Math.floor(end / BUCKET_MS)
+  for (const s of allDocs()) {
+    for (const [k, byAcct] of Object.entries(s.b || {})) {
+      const n = Number(k)
+      const c = byAcct[acct]
+      if (!c || n < lo || n > hi) continue
+      if (!c.m) {
+        old += c.u || 0
+        continue
+      }
+      for (const [m, r] of Object.entries(c.m)) {
+        const t = (by[m] ||= { i: 0, o: 0, cr: 0, cw: 0, u: 0 })
+        for (const f of Object.keys(t)) t[f] += r[f] || 0
+      }
+    }
+  }
+  return { models: Object.entries(by).sort((a, b) => b[1].u - a[1].u), old }
+}
 // The newest of a field's entries for an account and window, over every session.
 const newest = (field, acct, kind) =>
   allDocs()
@@ -597,7 +653,8 @@ function estimate(acct, kind, rd) {
   const base = baseline(acct, kind, rd)
   if (!base) return { q: null }
   // The bucket holding the baseline is left out: the response that moved the fill to it is there.
-  const from = (Math.floor(base.at / BUCKET_MS) + 1) * BUCKET_MS
+  // Except from an empty window (0%): nothing was spent in it before, so all of that bucket counts.
+  const from = (Math.floor(base.at / BUCKET_MS) + (base.p === 0 ? 0 : 1)) * BUCKET_MS
   const pts = rd.p - base.p
   const { usd } = from <= rd.at ? windowUsd(acct, from, rd.at) : { usd: 0 }
   if (pts >= MIN_PCT && usd > 0) return { q: usd / (pts / 100) }
@@ -668,6 +725,34 @@ const quotaAccts = () => {
   return [...set].sort((a, b) => (b === cur) - (a === cur) || a.localeCompare(b))
 }
 
+// Reset time of a window in UTC+8, "HH:mm", with the date ("MM-DD HH:mm") when not today there.
+const fmtReset = (r, now) => {
+  const t = new Date(r + 8 * 3600000)
+  const day = (ms) => Math.floor((ms + 8 * 3600000) / 86400000)
+  const p2 = (n) => String(n).padStart(2, '0')
+  const hm = p2(t.getUTCHours()) + ':' + p2(t.getUTCMinutes())
+  return day(r) === day(now) ? hm : p2(t.getUTCMonth() + 1) + '-' + p2(t.getUTCDate()) + ' ' + hm
+}
+// Time until a reset, "4天2小时15分钟": days, hours, minutes, leaving out leading zero units.
+const fmtLeft = (r, now) => {
+  const m = Math.max(0, Math.floor((r - now) / 60000))
+  const d = Math.floor(m / 1440)
+  const h = Math.floor((m % 1440) / 60)
+  const t = (d ? d + tr('uD') : '') + (d || h ? h + tr('uH') : '') + (m % 60) + tr('uM')
+  return tr('left', { t: t.trim() })
+}
+// A subscription end date typed as YYYY-MM-DD (UTC+8) lasts to the end of that day.
+const parseExp = (v) => {
+  const m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(String(v).trim())
+  if (!m) return null
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null
+  return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0')
+}
+const expMs = (v) => {
+  const [y, mo, d] = v.split('-').map(Number)
+  return Date.UTC(y, mo - 1, d + 1) - 8 * 3600000
+}
 const pctOf = (p) => (Number.isInteger(p) ? p : p.toFixed(1)) + '%'
 const fmtDur = (ms) => {
   const m = Math.max(0, Math.round(ms / 60000))
@@ -721,7 +806,9 @@ const STR = {
     exact: 'Exact', kmb: 'K/M/B', refresh: 'Refresh', cmd: 'Expand or collapse the usage window',
     upd: "New version {v}", updHow: "Update: run this in a terminal, then /reload-plugins", updShow: "How to update",
     quota: 'Quota estimate (API-equivalent value)', w5h: '5h', w7d: 'Week', qPred: 'Predicted {w} quota {q}', qNeed: '(after {n} more)', 
-    qEmpty: 'No rate-limit reading yet (subscription accounts only); it appears after your next message.', tUsage: 'Overview', tQuota: 'Quota', tModels: 'Models', tDaily: 'Daily',
+    expL: 'Subscription ends', expNone: 'not set', expSet: 'Set date', expPh: 'YYYY-MM-DD, press Enter', expDone: 'expired',
+    qRaw: 'Uncached', qCr: 'Cache read', qCw: 'Cache write', qIn: 'Input', qOut: 'Output', qOld: 'Earlier use (not split by model)',
+    left: '{t} left', uD: 'd ', uH: 'h ', uM: 'm', qEmpty: 'No rate-limit reading yet (subscription accounts only); it appears after your next message.', tUsage: 'Overview', tQuota: 'Quota', tModels: 'Models', tDaily: 'Daily',
   },
   'zh-CN': {
     session: '当前会话', today: '今日', hit: '缓存命中', vHide: '收起', vBrief: '简略', vFull: '详细',
@@ -735,7 +822,9 @@ const STR = {
     exact: '精确值', kmb: 'K/M/B', refresh: '刷新', cmd: '展开或收起用量小窗口',
     upd: "新版本 {v}", updHow: "更新方法：在终端运行下面的命令，然后 /reload-plugins", updShow: "更新方法",
     quota: '额度估算（API 等价价值）', w5h: '5小时', w7d: '每周', qPred: '预测{w}额度 {q}', qNeed: '（再用 {n} 后估算）', 
-    qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
+    expL: '订阅到期', expNone: '未设置', expSet: '设置', expPh: '输入 YYYY-MM-DD 后回车', expDone: '已到期',
+    qRaw: '非缓存输入', qCr: '缓存读', qCw: '缓存写', qIn: '总输入', qOut: '输出', qOld: '更早的用量（未分模型）',
+    left: '剩{t}', uD: '天', uH: '小时', uM: '分钟', qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
   },
   'zh-TW': {
     session: '目前工作階段', today: '今日', hit: '快取命中', vHide: '收合', vBrief: '簡略', vFull: '詳細',
@@ -875,19 +964,22 @@ async function detectLang($) {
 const acctName = (a) => cfg.names[a] || (cfg.hints || {})[a] || tr('acctN', { id: a.slice(0, 4) })
 const acctLabel = (a) => acctName(a) + (a === shownAcct() ? ' (' + tr('cur') + ')' : '')
 
-// The band's three views: 'hidden' (the view switch alone), 'brief' (the status line) and
-// 'full' (the status line and the detail card).
+// The band's three views: 'hidden' (nothing above the prompt), 'brief' (the status line) and
+// 'full' (the status line and the detail card). The switch between them is in the prompt footer.
 const VIEWS = [
   ['hidden', 'vHide'],
   ['brief', 'vBrief'],
   ['full', 'vFull'],
 ]
+// The view is shared by every session (cfg), so a change shows in all of them.
+const curView = () => (VIEWS.some(([v]) => v === cfg.view) ? cfg.view : 'brief')
 const setView = async ($, view) => {
-  await $.state.set(S_VIEW, view)
+  await updateCfg($, (c) => ({ ...c, view }))
   await $.state.set(S_EDITING, false)
+  await $.state.set(S_EXPING, null)
 }
 // /meter: open the card, or back to the status line when it is open.
-const toggleView = async ($) => setView($, ((await $.state.get(S_VIEW)).value ?? 'brief') === 'full' ? 'brief' : 'full')
+const toggleView = async ($) => setView($, curView() === 'full' ? 'brief' : 'full')
 
 // ---- module -----------------------------------------------------------------------------
 
@@ -916,6 +1008,8 @@ export function register(on) {
       checkUpdate($).catch(() => {})
       $.clock.every(3600000, () => checkUpdate($).catch(() => {}))
       $.clock.every(15000, () => refreshOthers($).catch(() => {}))
+      // Another session's change to the shared settings (the view, a rename) shows within seconds.
+      $.clock.every(3000, () => syncCfg($).catch(() => {}))
     })
     try {
       await $.command.register({ name: 'meter', description: tr('cmd'), immediate: true })
@@ -997,11 +1091,11 @@ export function register(on) {
     const els = $.ui.resolve(e)
     const { Box, Text, Button, Select, Code } = els
     const cols = e.props.bodyColumns || e.viewport?.columns || 100
-    const savedView = (await $.state.get(S_VIEW)).value
-    const view = VIEWS.some(([v]) => v === savedView) ? savedView : 'brief'
+    const view = curView()
     if (view === 'hidden') return next(e)
     const expanded = view === 'full'
     const editingName = (await $.state.get(S_EDITING)).value ?? false
+    const editingExp = (await $.state.get(S_EXPING)).value ?? null
     const tab = (await $.state.get(S_TAB)).value ?? 'usage'
     const tps = (await $.state.get(S_TPS)).value ?? null
     const now = await $.clock.now()
@@ -1019,6 +1113,9 @@ export function register(on) {
     // The current account's rate-limit fill, "5h 6% · Week 91%", while a window is live.
     const fills = cur === 'unknown' ? [] : quotaRows(cur, now).filter((q) => q.live)
     const fillWide = fills.map((q) => tr(q.kind === 'five_hour' ? 'w5h' : 'w7d') + ' ' + pctOf(q.live.p))
+    const fillReset = fills.map(
+      (q) => tr(q.kind === 'five_hour' ? 'w5h' : 'w7d') + ' ' + pctOf(q.live.p) + ' → ' + fmtReset(q.live.r, now) + ' (UTC+8)',
+    )
     const fillShort = fills.length ? [fills.map((q) => pctOf(q.live.p)).join('/')] : []
     const full = [
       '⚡ ' + (tps ? shortModel(tps.model) + ' ' : '') + tpsText,
@@ -1031,6 +1128,7 @@ export function register(on) {
     // Narrower and narrower: the model name, then the cache hit, go before the fills; the cryptic
     // compact form is the last resort.
     const variants = [
+      [...full, ...fillReset],
       [...full, ...fillWide],
       [...mid, ...fillWide],
       [...mid.slice(0, 3), ...fillWide],
@@ -1042,10 +1140,8 @@ export function register(on) {
       ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 + (expanded ? 0 : strWidth(tr('updShow')) + 2)
       : 0
     const langW = expanded ? strWidth(cfg.lang === 'auto' ? 'Auto · ' + LANG_NAMES[autoLang] : LANG_NAMES[cfg.lang] || '') + 8 : 0
-    // The view switch: its labels and the gaps between them and before it.
-    // The current view is drawn in brackets, 2 cells more.
-    const switchW = VIEWS.reduce((w, [, label]) => w + strWidth(tr(label)) + 2, 0) + 4
-    const room = cols - switchW - badge - langW
+    // The view switch is in the prompt footer (SessionMode), not here.
+    const room = cols - badge - langW
     const status = variants.find((v) => strWidth(v) <= room) || variants[variants.length - 1]
 
     const left = Box({
@@ -1062,7 +1158,7 @@ export function register(on) {
       ],
     })
 
-    // At the right end of the top line: the language picker while the card is open, then the view switch.
+    // At the right end of the top line: the language picker while the card is open.
     const langOptions = [
       { value: 'auto', label: 'Auto · ' + LANG_NAMES[autoLang] },
       ...LANG_ORDER.map((code) => ({ value: code, label: LANG_NAMES[code] })),
@@ -1083,16 +1179,6 @@ export function register(on) {
               }),
             ]
           : []),
-        // The current view is drawn at full strength and in brackets, the other two dim.
-        ...VIEWS.map(([v, label]) =>
-          Button({
-            key: 'view-' + v,
-            label: view === v ? '[' + tr(label) + ']' : tr(label),
-            plain: true,
-            dimColor: view !== v,
-            onPress: () => setView($, v),
-          }),
-        ),
       ],
     })
     const line = Box({
@@ -1109,21 +1195,34 @@ export function register(on) {
       children.push(Text({ color: 'yellow', children: [tr('updHow')] }))
       children.push(Code({ source: updateCommand($), language: 'sh' }))
     }
-    if (expanded) children.push(detailView($, els, now, cols, editingName, tab))
+    if (expanded) children.push(detailView($, els, now, cols, editingName, tab, editingExp))
     const rest = await next(e)
     if (rest) children.push(rest)
     return children.length === 1 ? line : Box({ flexDirection: 'column', children })
   })
 
-  // The hidden view's entry, at the left of the prompt footer's mode labels: speed, session
-  // value and the update mark; a press brings the status line back.
+  // The prompt footer, at the left of its mode labels, in every view: speed, session value and the
+  // update mark, then the view switch, one button that shows the current view and goes to the next
+  // (hidden, brief, full) when pressed.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    const savedView = (await $.state.get(S_VIEW)).value
-    if (savedView !== 'hidden') return next(e)
-    const { Box, Button } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const view = curView()
     const tps = (await $.state.get(S_TPS)).value ?? null
     const label = '⚡' + (tps ? tps.value.toFixed(0) : '—') + ' · ' + usdOf(sessionTotals()) + (latest ? ' ⬆' : '')
-    const entry = Button({ key: 'meter-show', label, plain: true, dimColor: true, onPress: () => setView($, 'brief') })
+    const at = VIEWS.findIndex(([v]) => v === view)
+    const entry = Box({
+      flexDirection: 'row',
+      columnGap: 2,
+      children: [
+        Text({ dimColor: true, children: [label] }),
+        Button({
+          key: 'view-cycle',
+          label: '[' + tr(VIEWS[at][1]) + ']',
+          plain: true,
+          onPress: () => setView($, VIEWS[(at + 1) % VIEWS.length][0]),
+        }),
+      ],
+    })
     const rest = await next(e)
     return rest ? Box({ flexDirection: 'row', columnGap: 2, children: [entry, rest] }) : entry
   })
@@ -1133,7 +1232,7 @@ export function register(on) {
 // quota estimate, per-model share and TPS, or per-day value. One tab at a time keeps the card
 // within the band's rows (a taller tree scrolls inside the band).
 // cols is the band's width; the card's inside is 4 cells narrower (border and padding).
-function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingName, tab) {
+function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingName, tab, editingExp) {
   const inner = Math.max(30, cols - 4)
   const wide = inner >= 66
   const range = Number(cfg.range)
@@ -1241,25 +1340,109 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
   // Quota estimate, per account with a reading: the selected one, or all of them under "all".
   // A row: predicted quota, fill, bar. While the fill is too low to divide by (or the
   // window has reset) the last estimate stands in; with none at all the value is "—".
+  // The subscription end date, if set, sits in the quota title between the account and "UTC+8".
+  const expTitle = (a) => {
+    const v = cfg.exp[a]
+    if (!v) return ''
+    const end = expMs(v)
+    return ' · ' + tr('expL') + ' ' + v + ' ' + (end > now ? fmtLeft(end, now) : tr('expDone'))
+  }
   const quota = []
   const qAccts = quotaAccts().filter((a) => acctSel === 'all' || a === acctSel)
   for (const a of qAccts) {
     const rows = quotaRows(a, now)
     if (!rows.length) continue
-    quota.push(Text({ bold: true, children: [tr('quota') + (qAccts.length > 1 || acctSel === 'all' ? ' · ' + acctName(a) : '')] }))
+    quota.push(
+      Box({
+        key: 'qt-' + a,
+        flexDirection: 'row',
+        columnGap: 2,
+        children: [
+          Text({ bold: true, children: [tr('quota') + (qAccts.length > 1 || acctSel === 'all' ? ' · ' + acctName(a) : '') + expTitle(a) + ' · UTC+8'] }),
+          Button({ key: 'exp-edit-' + a, label: '✎ ' + tr('expSet'), plain: true, onPress: () => $.state.set(S_EXPING, a) }),
+        ],
+      }),
+    )
+    // Subscription end date, typed by hand (the engine does not report it). The field opens right
+    // under its account's title: at the foot of a card taller than the band it was out of sight.
+    if (editingExp === a) {
+      quota.push(
+        Input({
+          key: 'exp-' + a,
+          label: tr('expL'),
+          placeholder: tr('expPh'),
+          value: cfg.exp[a] || '',
+          submitLabel: tr('save'),
+          autoFocus: true,
+          onSubmit: async (val) => {
+            await $.state.set(S_EXPING, null)
+            const ok = parseExp(val)
+            if (!ok && val.trim()) return
+            return updateCfg($, (c) => {
+              if (ok) c.exp[a] = ok
+              else delete c.exp[a]
+              return c
+            })
+          },
+        }),
+      )
+    }
     for (const { kind, live, est, prev } of rows) {
       const w = tr(kind === 'five_hour' ? 'w5h' : 'w7d')
       const q = est?.q ?? prev?.q ?? null
       const need = q === null && est?.need ? ' ' + tr('qNeed', { n: pctOf(est.need) }) : ''
       const barW = Math.max(6, Math.min(20, Math.floor(inner / 5)))
+      const resetW = Math.max(14, Math.min(34, inner - 6 - barW - 10 - 3))
       const text = tr('qPred', { w, q: q === null ? '—' : fmtUsd(q) }) + need
       quota.push(
         row([
-          cell(Math.max(10, Math.min(28, inner - 6 - barW - 2)), text),
+          cell(Math.max(10, Math.min(28, inner - 6 - barW - resetW - 3)), text),
           num(6, live ? pctOf(live.p) : '—'),
           bar(barW, live ? Math.min(1, live.p / 100) : 0),
+          cell(resetW, live ? '→ ' + fmtReset(live.r, now) + ' · ' + fmtLeft(live.r, now) : '', { dimColor: true }),
         ]),
       )
+      // The live window's use by model: input (all), output, value.
+      if (live) {
+        const { models, old } = windowModels(a, live.r - WINDOWS[kind], now)
+        // Name, the three parts of the input (uncached, cache read, cache write), their sum,
+        // output, value;
+        // each token column as wide as its label and the longest number the format gives.
+        const colW = (k) => strWidth(tr(k)) + 1 + (cfg.exact ? 13 : 7)
+        const [rawW, cacheW, cwW, inW, outW] = ['qRaw', 'qCr', 'qCw', 'qIn', 'qOut'].map(colW)
+        const nameW = Math.max(12, Math.min(22, inner - 2 - rawW - cacheW - cwW - inW - outW - 9 - 7))
+        const tokCells = (r, opts) => [
+          cell(rawW, tr('qRaw') + ' ' + tok(r.i), opts),
+          cell(cacheW, tr('qCr') + ' ' + tok(r.cr), opts),
+          cell(cwW, tr('qCw') + ' ' + tok(r.cw), opts),
+          cell(inW, tr('qIn') + ' ' + tok(r.i + r.cr + r.cw), opts),
+          cell(outW, tr('qOut') + ' ' + tok(r.o), opts),
+        ]
+        for (const [m, r] of models) {
+          quota.push(
+            row([
+              cell(2, ''),
+              cell(nameW, shortModel(m) + (priceOf(m) ? '' : ' ⚠'), { dimColor: true }),
+              ...tokCells(r, { dimColor: true }),
+              num(9, fmtUsd(r.u)),
+            ]),
+          )
+        }
+        if (old > 0) quota.push(row([cell(2, ''), cell(nameW + rawW + cacheW + cwW + inW + outW + 5, tr('qOld'), { dimColor: true }), num(9, fmtUsd(old))]))
+        // The window's total: the tokens of the split use, the value of all of it.
+        if (models.length || old > 0) {
+          const sum = (f) => models.reduce((n, [, r]) => n + r[f], 0)
+          const all = { i: sum('i'), cr: sum('cr'), cw: sum('cw'), o: sum('o') }
+          quota.push(
+            row([
+              cell(2, ''),
+              cell(nameW, tr('total'), { bold: true }),
+              ...tokCells(all, { bold: true }),
+              Box({ width: 9, justifyContent: 'flex-end', children: [Text({ bold: true, children: [fmtUsd(sum('u') + old)] })] }),
+            ]),
+          )
+        }
+      }
     }
   }
   if (!quota.length) quota.push(Text({ dimColor: true, wrap: 'wrap', children: [tr('qEmpty')] }))

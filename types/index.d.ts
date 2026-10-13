@@ -5,8 +5,8 @@ export type MuxueMeterTps = { value: number; model: string }
 declare module 'claude-code' {
   interface PluginState {
     'muxue-meter': {
-      view: 'hidden' | 'brief' | 'full'
       editingName: boolean
+      editingExp: string | null
       tps: MuxueMeterTps | null
       tab: 'usage' | 'quota' | 'models' | 'daily'
     }
